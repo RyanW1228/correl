@@ -35,6 +35,10 @@ export function addEquivalenceClass(
 }
 
 /** --- Quotes (no state changes) --- */
+/**
+ * Quote a payoff-equivalent swap.
+ * Valid iff: same classId AND same polarity.
+ */
 export function quoteSwap(
   state: EngineState,
   fromAssetId: Id,
@@ -44,10 +48,14 @@ export function quoteSwap(
   throw new Error("not implemented");
 }
 
+/**
+ * Quote a redemption of opposite-payoff assets (POS + NEG).
+ * Valid iff: same classId AND opposite polarity.
+ */
 export function quoteRedeem(
   state: EngineState,
-  yesAssetId: Id,
-  noAssetId: Id,
+  posAssetId: Id,
+  negAssetId: Id,
   qtyPairs: number
 ): RedeemQuote {
   throw new Error("not implemented");
@@ -59,6 +67,10 @@ export type ApplySwapResult = {
   nextBalances: UserBalances;
 };
 
+/**
+ * Apply a payoff-equivalent swap.
+ * Valid iff: same classId AND same polarity.
+ */
 export function applySwap(
   state: EngineState,
   balances: UserBalances,
@@ -74,11 +86,15 @@ export type ApplyRedeemResult = {
   nextBalances: UserBalances;
 };
 
+/**
+ * Apply a redemption of opposite-payoff assets (POS + NEG).
+ * Valid iff: same classId AND opposite polarity.
+ */
 export function applyRedeem(
   state: EngineState,
   balances: UserBalances,
-  yesAssetId: Id,
-  noAssetId: Id,
+  posAssetId: Id,
+  negAssetId: Id,
   qtyPairs: number
 ): ApplyRedeemResult {
   throw new Error("not implemented");
