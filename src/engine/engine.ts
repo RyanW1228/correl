@@ -45,7 +45,40 @@ export function quoteSwap(
   toAssetId: Id,
   qty: number
 ): SwapQuote {
-  throw new Error("not implemented");
+  if (!Number.isFinite(qty) || qty <= 0) {
+    throw new InvalidOperationError(`qty must be > 0 (got ${qty})`);
+  }
+  if (fromAssetId === toAssetId) {
+    throw new InvalidOperationError("fromAssetId and toAssetId must differ");
+  }
+
+  const from = state.assets[fromAssetId];
+  if (!from) throw new NotFoundError(`Unknown fromAssetId: ${fromAssetId}`);
+
+  const to = state.assets[toAssetId];
+  if (!to) throw new NotFoundError(`Unknown toAssetId: ${toAssetId}`);
+
+  if (from.classId !== to.classId) {
+    throw new InvalidOperationError(
+      `Swap requires same classId (from=${from.classId}, to=${to.classId})`
+    );
+  }
+  if (from.polarity !== to.polarity) {
+    throw new InvalidOperationError(
+      `Swap requires same polarity (from=${from.polarity}, to=${to.polarity})`
+    );
+  }
+
+  const qtyOut = qty; // v0: 1:1 shares
+  const notionalUsd = qty * state.fee.notionalPerShareUsd;
+  const feeUsd = (notionalUsd * state.fee.feeBps) / 10_000;
+
+  return {
+    qtyIn: qty,
+    qtyOut,
+    notionalUsd,
+    feeUsd,
+  };
 }
 
 /**
