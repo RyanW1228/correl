@@ -6,8 +6,15 @@ export type Id = string;
 /** v0 scope: Polymarket only */
 export type Venue = "polymarket";
 
-/** Claim side */
+/** Venue label for an outcome */
 export type Side = "YES" | "NO";
+
+/**
+ * Payoff orientation relative to the equivalence class's canonical event E.
+ * POS = pays if E happens
+ * NEG = pays if NOT(E) happens
+ */
+export type Polarity = "POS" | "NEG";
 
 /**
  * Polymarket market = the question/container.
@@ -40,12 +47,18 @@ export type OutcomeAsset = {
 
   /**
    * Polymarket asset id for this option (token/position id).
-   * This uniquely identifies the tradable outcome.
+   * Uniquely identifies the tradable outcome.
    */
   assetId: string;
 
-  /** YES or NO */
+  /** Venue label (YES / NO) */
   side: Side;
+
+  /**
+   * Payoff orientation relative to the class's canonical event E.
+   * Enables swaps across YES/NO when wording is negated (e.g., A-YES ≡ B-NO).
+   */
+  polarity: Polarity;
 
   /** Equivalence class (canonical real-world event) */
   classId: Id;
@@ -81,7 +94,7 @@ export type FeeConfig = {
   notionalPerShareUsd: number;
 };
 
-/** Quote for a same-side swap (A → B), 1:1 shares in v0 */
+/** Quote for a payoff-equivalent swap (A → B), 1:1 shares in v0 */
 export type SwapQuote = {
   qtyIn: number;
   qtyOut: number; // v0: 1:1
@@ -89,7 +102,7 @@ export type SwapQuote = {
   feeUsd: number;
 };
 
-/** Quote for redeeming YES + NO */
+/** Quote for redeeming opposite-payoff assets (POS + NEG) */
 export type RedeemQuote = {
   qtyPairs: number;
   grossUsd: number;
