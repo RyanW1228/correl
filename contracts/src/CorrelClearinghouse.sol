@@ -42,16 +42,41 @@ contract CorrelClearinghouse is ERC1155Holder {
     // Exactly one USDC pool
     PoolBase private usdcPool;
 
+    // ----------------------------
+    // Cross-pool migration (token-share rewards)
+    // ----------------------------
+    // For an "earning pool" E (the pool whose liquidity was consumed; i.e. toAsset in A->B),
+    // we pay LPs of E with shares in some "reward pool" R (i.e. fromAsset pool).
+    //
+    // Key: We DO NOT mint reward-pool shares directly to each LP at swap time (can't iterate).
+    // Instead:
+    //  1) We mint reward-pool shares to a deterministic "holder address" H(E,R)
+    //     so those shares EXIST immediately and participate in downstream accrual (multi-hop).
+    //  2) We run an accumulator inside E for each R, so E-LPs can be auto-credited
+    //     with their pro-rata portion of those reward-pool shares on any interaction.
+    struct CrossReward {
+        // cumulative rewardPoolShares-per-earningPoolShare (scaled by ACC)
+        uint256 accRewardSharesPerEarnShare;
+        // LP -> debt in rewardPoolShares terms
+        mapping(address => uint256) rewardDebt;
+    }
+
+    // earningAssetId (E) => rewardAssetId (R) => CrossReward
+    mapping(bytes32 => mapping(bytes32 => CrossReward)) private crossReward;
+
+    // Track active reward assets per earning pool so we can auto-sync/auto-claim safely
+    mapping(bytes32 => bytes32[]) private activeRewardAssets; // E => [R...]
+    mapping(bytes32 => mapping(bytes32 => bool)) private isActiveRewardAsset; // E => R => bool
+
+    // ----------------------------
     // Token pool = base pool + swap-fee distribution state
+    // ----------------------------
     struct TokenPool {
         PoolBase base;
         // Swap fee distribution as USDC-pool shares:
-        // accumulator: cumulative USDC-pool-shares-per-token-share (scaled by 1e18)
-        uint256 accUsdcSharesPerTokenShare;
-        // LP -> reward debt in "USDC-pool shares" terms (prevents double-claim)
-        mapping(address => uint256) rewardDebt;
-        // USDC-pool shares reserved for this token pool’s LPs to claim
-        uint256 usdcShareBucket;
+        uint256 accUsdcSharesPerTokenShare; // scaled by ACC
+        mapping(address => uint256) rewardDebt; // debt in "USDC-pool shares"
+        uint256 usdcShareBucket; // claimable USDC-pool shares reserved for this token pool’s LPs
     }
 
     // One pool per outcome token assetId
@@ -157,6 +182,13 @@ contract CorrelClearinghouse is ERC1155Holder {
         bytes32 indexed assetId,
         address indexed lp,
         uint256 usdcPoolShares
+    );
+
+    // Cross-pool migration credit (E pool earns R-pool shares)
+    event CrossPoolShareCredited(
+        bytes32 indexed earningAssetId,
+        bytes32 indexed rewardAssetId,
+        uint256 rewardPoolSharesMinted
     );
 
     // ----------------------------
@@ -273,6 +305,23 @@ contract CorrelClearinghouse is ERC1155Holder {
         return _pendingUsdcShares(assetId, lp);
     }
 
+    // Cross migration views
+    function activeRewardAssetsFor(
+        bytes32 earningAssetId
+    ) external view returns (bytes32[] memory) {
+        return activeRewardAssets[earningAssetId];
+    }
+
+    function pendingCrossRewardPoolShares(
+        bytes32 earningAssetId,
+        bytes32 rewardAssetId,
+        address lp
+    ) external view returns (uint256) {
+        _requireAsset(earningAssetId);
+        _requireAsset(rewardAssetId);
+        return _pendingCrossRewardShares(earningAssetId, rewardAssetId, lp);
+    }
+
     function tokenPoolBalance(bytes32 assetId) public view returns (uint256) {
         AssetInfo memory a = _requireAsset(assetId);
         return a.token.balanceOf(address(this), a.tokenId);
@@ -281,11 +330,6 @@ contract CorrelClearinghouse is ERC1155Holder {
     // ----------------------------
     // Step 2: LP deposit/withdraw — USDC pool
     // ----------------------------
-
-    /**
-     * Deposit USDC into the USDC pool and receive USDC-pool shares.
-     * LP must approve USDC to this contract first.
-     */
     function depositUsdc(
         uint256 amount
     ) external returns (uint256 sharesMinted) {
@@ -313,10 +357,6 @@ contract CorrelClearinghouse is ERC1155Holder {
         emit DepositedUsdc(msg.sender, amount, sharesMinted);
     }
 
-    /**
-     * Withdraw USDC by burning USDC-pool shares.
-     * Withdrawal is limited by available liquidity = balance - locked.
-     */
     function withdrawUsdc(
         uint256 sharesBurned
     ) external returns (uint256 amountOut) {
@@ -346,15 +386,10 @@ contract CorrelClearinghouse is ERC1155Holder {
 
     // ----------------------------
     // Step 2: LP deposit/withdraw — Token pools (per assetId)
-    // Includes auto-claim of swap-fee entitlements
+    // Includes auto-claim of:
+    //  - swap-fee entitlements (USDC-pool shares)
+    //  - cross-pool migrated token-share entitlements (reward-pool shares)
     // ----------------------------
-
-    /**
-     * Deposit ERC1155 outcome tokens for a specific assetId into its token pool.
-     * LP must setApprovalForAll(this, true) on the ERC1155 contract first.
-     *
-     * Auto-claims any pending swap-fee USDC-pool shares BEFORE changing token shares.
-     */
     function depositToken(
         bytes32 assetId,
         uint256 qty
@@ -364,8 +399,8 @@ contract CorrelClearinghouse is ERC1155Holder {
 
         TokenPool storage p = tokenPool[assetId];
 
-        // auto-claim pending before share change
-        _autoClaimSwapFees(assetId, msg.sender, p);
+        // auto-claim ALL entitlements before share change (prevents retroactive claims)
+        _autoClaimAll(assetId, msg.sender, p);
 
         uint256 balBefore = tokenPoolBalance(assetId);
         uint256 S = p.base.totalShares;
@@ -383,18 +418,12 @@ contract CorrelClearinghouse is ERC1155Holder {
         p.base.totalShares = S + sharesMinted;
         p.base.shares[msg.sender] += sharesMinted;
 
-        // sync reward debt after share change
-        _syncRewardDebt(assetId, msg.sender, p);
+        // sync debts after share change
+        _syncAllDebts(assetId, msg.sender, p);
 
         emit DepositedToken(assetId, msg.sender, qty, sharesMinted);
     }
 
-    /**
-     * Withdraw ERC1155 outcome tokens by burning token-pool shares.
-     * Withdrawal is limited by available = balance - locked.
-     *
-     * Auto-claims any pending swap-fee USDC-pool shares BEFORE changing token shares.
-     */
     function withdrawToken(
         bytes32 assetId,
         uint256 sharesBurned
@@ -404,8 +433,8 @@ contract CorrelClearinghouse is ERC1155Holder {
 
         TokenPool storage p = tokenPool[assetId];
 
-        // auto-claim pending before share change
-        _autoClaimSwapFees(assetId, msg.sender, p);
+        // auto-claim ALL entitlements before share change (prevents retroactive claims)
+        _autoClaimAll(assetId, msg.sender, p);
 
         uint256 userShares = p.base.shares[msg.sender];
         require(userShares >= sharesBurned, "insufficient shares");
@@ -425,8 +454,8 @@ contract CorrelClearinghouse is ERC1155Holder {
             p.base.totalShares = S - sharesBurned;
         }
 
-        // sync reward debt after share change
-        _syncRewardDebt(assetId, msg.sender, p);
+        // sync debts after share change
+        _syncAllDebts(assetId, msg.sender, p);
 
         a.token.safeTransferFrom(
             address(this),
@@ -439,10 +468,8 @@ contract CorrelClearinghouse is ERC1155Holder {
     }
 
     // ----------------------------
-    // Step 4: LP claims swap-fee entitlement (manual claim)
-    // (deposit/withdraw already auto-claims; this is optional convenience)
+    // Optional manual claim: swap-fee entitlement
     // ----------------------------
-
     function claimSwapFees(
         bytes32 assetId
     ) external returns (uint256 claimedUsdcPoolShares) {
@@ -467,14 +494,7 @@ contract CorrelClearinghouse is ERC1155Holder {
 
     // ----------------------------
     // Step 3: Quote locking (reserve liquidity)
-    // Admin-only because off-chain overseer decides fillability.
     // ----------------------------
-
-    /**
-     * Create a SWAP lock:
-     * - Reserves `qty` units in the toAsset token pool.
-     * - Enforces same class + same polarity.
-     */
     function lockSwap(
         bytes32 lockId,
         address taker,
@@ -523,12 +543,6 @@ contract CorrelClearinghouse is ERC1155Holder {
         emit QuoteLocked(lockId, LockKind.SWAP, taker, deadline);
     }
 
-    /**
-     * Create a REDEEM lock:
-     * - Reserves `netUsdc` units in the USDC pool for payout.
-     * - Enforces same class + POS/NEG pairing.
-     * - Enforces net + fee = qtyPairs (all in USDC base units).
-     */
     function lockRedeem(
         bytes32 lockId,
         address taker,
@@ -580,11 +594,6 @@ contract CorrelClearinghouse is ERC1155Holder {
         emit QuoteLocked(lockId, LockKind.REDEEM, taker, deadline);
     }
 
-    /**
-     * Expire an unconsumed lock after its deadline:
-     * - Releases reserved liquidity back to the pool.
-     * - Marks the lock as closed (consumed=true in v0).
-     */
     function expireLock(bytes32 lockId) external {
         Lock storage L = locks[lockId];
         require(L.taker != address(0), "unknown lock");
@@ -602,14 +611,16 @@ contract CorrelClearinghouse is ERC1155Holder {
     // ----------------------------
 
     /**
-     * Execute a SWAP lock:
-     * - Caller must be the taker.
-     * - Consumes the reserved qty from the toAsset pool.
-     * - Moves ERC1155 tokens:
-     *     taker -> contract: qty fromAsset
-     *     contract -> taker: qty toAsset
-     * - Collects fee in USDC from taker (on top).
-     * - Credits that fee ONLY to the toAsset pool LPs via USDC-pool shares accumulator.
+     * CHANGE IMPLEMENTED:
+     * - When swapping A -> B (fromAsset -> toAsset), the "toAsset" pool liquidity is consumed.
+     * - Therefore the LPs of the toAsset pool earn:
+     *     (1) fromAsset-pool shares representing the incoming fromAsset tokens, AND
+     *     (2) USDC-pool shares representing the swap fee.
+     *
+     * This is implemented without iterating LPs:
+     * - fromAsset tokens arrive in contract
+     * - we mint fromAsset pool shares to a holder H(toAsset, fromAsset)
+     * - we update an accumulator so toAsset LPs can be auto-credited those shares on interaction
      */
     function executeSwap(bytes32 lockId) external {
         Lock storage L = locks[lockId];
@@ -623,7 +634,7 @@ contract CorrelClearinghouse is ERC1155Holder {
         AssetInfo memory fromA = _requireAsset(L.fromAssetId);
         AssetInfo memory toA = _requireAsset(L.toAssetId);
 
-        // Consume reservation
+        // Consume reservation (toAsset liquidity)
         TokenPool storage tp = tokenPool[L.toAssetId];
         require(tp.base.locked >= L.qty, "bad locked");
         unchecked {
@@ -648,7 +659,14 @@ contract CorrelClearinghouse is ERC1155Holder {
             ""
         );
 
-        // Fee on top (USDC)
+        // Cross-pool migration: toAsset LPs earn fromAsset-pool shares (for the incoming tokens)
+        _creditIncomingTokenToEarningPoolAsShares(
+            /*earningAssetId=*/ L.toAssetId,
+            /*rewardAssetId=*/ L.fromAssetId,
+            /*incomingQty=*/ L.qty
+        );
+
+        // Fee on top (USDC): credited ONLY to the toAsset pool LPs as USDC-pool shares
         if (L.feeUsdc > 0) {
             require(
                 usdc.transferFrom(L.taker, address(this), L.feeUsdc),
@@ -669,16 +687,6 @@ contract CorrelClearinghouse is ERC1155Holder {
         );
     }
 
-    /**
-     * Execute a REDEEM lock:
-     * - Caller must be the taker.
-     * - Consumes reserved netUsdc from USDC pool.
-     * - Moves ERC1155 tokens:
-     *     taker -> contract: qtyPairs POS token
-     *     taker -> contract: qtyPairs NEG token
-     * - Pays net USDC to taker.
-     * - Fee is "kept" by paying net (no extra transfers needed).
-     */
     function executeRedeem(bytes32 lockId) external {
         Lock storage L = locks[lockId];
         require(L.taker != address(0), "unknown lock");
@@ -732,18 +740,89 @@ contract CorrelClearinghouse is ERC1155Holder {
     }
 
     // ----------------------------
-    // Internals: Fee crediting (swap fees -> token-pool LPs ONLY)
+    // Internals: Cross-pool migration (incoming token -> reward-pool shares)
     // ----------------------------
 
-    /**
-     * Convert fee USDC into USDC-pool shares, and attribute those shares ONLY to
-     * the LPs of the specified token pool using an accumulator model.
-     *
-     * Rule:
-     * - swap fee earned by "toAsset pool" LPs
-     *
-     * NOTE: If there are no token LPs, we revert (so the fee cannot fall through to USDC LPs).
-     */
+    function _creditIncomingTokenToEarningPoolAsShares(
+        bytes32 earningAssetId,
+        bytes32 rewardAssetId,
+        uint256 incomingQty
+    ) internal {
+        _requireAsset(earningAssetId);
+        _requireAsset(rewardAssetId);
+        require(incomingQty > 0, "qty=0");
+
+        TokenPool storage earningPool = tokenPool[earningAssetId];
+        require(earningPool.base.totalShares > 0, "no earning LPs");
+
+        // Ensure reward asset is active so future LP interactions sync debts safely
+        _activateRewardAssetIfNeeded(earningAssetId, rewardAssetId);
+
+        // Mint reward-asset pool shares equivalent to the incoming tokens.
+        // Tokens already arrived, so balance-before-incoming = currentBalance - incomingQty.
+        TokenPool storage rewardPool = tokenPool[rewardAssetId];
+        uint256 balBeforeIncoming = tokenPoolBalance(rewardAssetId) -
+            incomingQty;
+        uint256 S = rewardPool.base.totalShares;
+
+        uint256 mintedRewardPoolShares;
+        if (S == 0) {
+            // 1 share per 1 token base unit
+            mintedRewardPoolShares = incomingQty;
+        } else {
+            require(balBeforeIncoming > 0, "bad reward bal");
+            mintedRewardPoolShares = (incomingQty * S) / balBeforeIncoming;
+            require(mintedRewardPoolShares > 0, "mint=0");
+        }
+
+        // Shares must EXIST immediately (for downstream accrual), so mint into totalShares now,
+        // and assign them to a deterministic holder that represents (earningPool -> rewardPool).
+        rewardPool.base.totalShares = S + mintedRewardPoolShares;
+
+        address holder = _crossHolder(earningAssetId, rewardAssetId);
+        rewardPool.base.shares[holder] += mintedRewardPoolShares;
+
+        // Attribute those holder-owned rewardPool shares to earningPool LPs via accumulator
+        CrossReward storage cr = crossReward[earningAssetId][rewardAssetId];
+        cr.accRewardSharesPerEarnShare +=
+            (mintedRewardPoolShares * ACC) /
+            earningPool.base.totalShares;
+
+        emit CrossPoolShareCredited(
+            earningAssetId,
+            rewardAssetId,
+            mintedRewardPoolShares
+        );
+    }
+
+    function _activateRewardAssetIfNeeded(
+        bytes32 earningAssetId,
+        bytes32 rewardAssetId
+    ) internal {
+        if (isActiveRewardAsset[earningAssetId][rewardAssetId]) return;
+        isActiveRewardAsset[earningAssetId][rewardAssetId] = true;
+        activeRewardAssets[earningAssetId].push(rewardAssetId);
+    }
+
+    function _crossHolder(
+        bytes32 earningAssetId,
+        bytes32 rewardAssetId
+    ) internal pure returns (address) {
+        // Deterministic pseudo-address. Only used as a key in mappings.
+        // No one has the private key; it is not meant to be an EOA.
+        bytes32 h = keccak256(
+            abi.encodePacked(
+                "CORREL_CROSS_HOLDER",
+                earningAssetId,
+                rewardAssetId
+            )
+        );
+        return address(uint160(uint256(h)));
+    }
+
+    // ----------------------------
+    // Internals: Fee crediting (swap fees -> token-pool LPs ONLY)
+    // ----------------------------
     function _creditSwapFeeToTokenPool(
         bytes32 earningAssetId,
         uint256 feeUsdc
@@ -751,14 +830,12 @@ contract CorrelClearinghouse is ERC1155Holder {
         TokenPool storage p = tokenPool[earningAssetId];
         require(p.base.totalShares > 0, "no token LPs");
 
-        // Mint USDC-pool shares equivalent to feeUsdc.
         // Fee already arrived into contract balance, so balance-before-fee = currentBalance - feeUsdc.
         uint256 balBeforeFee = usdcPoolBalance() - feeUsdc;
         uint256 S = usdcPool.totalShares;
 
         uint256 feeShares;
         if (S == 0) {
-            // first shares in USDC pool: 1 share per 1 USDC base unit
             feeShares = feeUsdc;
         } else {
             require(balBeforeFee > 0, "bad usdc bal");
@@ -766,20 +843,16 @@ contract CorrelClearinghouse is ERC1155Holder {
             require(feeShares > 0, "feeShares=0");
         }
 
-        // Mint shares into existence (no owner yet; they sit in the token pool bucket)
+        // Mint into existence (unowned) and park in bucket for this token pool
         usdcPool.totalShares = S + feeShares;
-
-        // Bucket holds claimable USDC-pool shares for this token pool's LPs
         p.usdcShareBucket += feeShares;
 
-        // Increase accumulator so LPs can claim pro-rata WITHOUT iterating
         p.accUsdcSharesPerTokenShare += (feeShares * ACC) / p.base.totalShares;
     }
 
     // ----------------------------
-    // Internals: Reward accounting helpers
+    // Internals: Reward accounting helpers (swap fees)
     // ----------------------------
-
     function _pendingUsdcShares(
         bytes32 assetId,
         address lp
@@ -816,7 +889,6 @@ contract CorrelClearinghouse is ERC1155Holder {
     ) internal {
         uint256 pending = _pendingUsdcShares(assetId, lp, p);
         if (pending == 0) {
-            // still keep debt aligned
             _syncRewardDebt(assetId, lp, p);
             return;
         }
@@ -830,6 +902,111 @@ contract CorrelClearinghouse is ERC1155Holder {
         _syncRewardDebt(assetId, lp, p);
 
         emit SwapFeeClaimed(assetId, lp, pending);
+    }
+
+    // ----------------------------
+    // Internals: Reward accounting helpers (cross-pool migrated token shares)
+    // ----------------------------
+    function _pendingCrossRewardShares(
+        bytes32 earningAssetId,
+        bytes32 rewardAssetId,
+        address lp
+    ) internal view returns (uint256) {
+        CrossReward storage cr = crossReward[earningAssetId][rewardAssetId];
+        TokenPool storage ep = tokenPool[earningAssetId];
+
+        uint256 lpEarnShares = ep.base.shares[lp];
+        uint256 accrued = (lpEarnShares * cr.accRewardSharesPerEarnShare) / ACC;
+        uint256 debt = cr.rewardDebt[lp];
+        if (accrued <= debt) return 0;
+        return accrued - debt;
+    }
+
+    function _syncCrossDebt(
+        bytes32 earningAssetId,
+        bytes32 rewardAssetId,
+        address lp
+    ) internal {
+        CrossReward storage cr = crossReward[earningAssetId][rewardAssetId];
+        TokenPool storage ep = tokenPool[earningAssetId];
+
+        uint256 lpEarnShares = ep.base.shares[lp];
+        cr.rewardDebt[lp] =
+            (lpEarnShares * cr.accRewardSharesPerEarnShare) /
+            ACC;
+    }
+
+    function _autoClaimCrossRewards(
+        bytes32 earningAssetId,
+        address lp
+    ) internal {
+        bytes32[] storage list = activeRewardAssets[earningAssetId];
+        uint256 n = list.length;
+        if (n == 0) return;
+
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 rewardAssetId = list[i];
+            CrossReward storage cr = crossReward[earningAssetId][rewardAssetId];
+
+            TokenPool storage earningPool = tokenPool[earningAssetId];
+            uint256 lpEarnShares = earningPool.base.shares[lp];
+
+            uint256 accrued = (lpEarnShares * cr.accRewardSharesPerEarnShare) /
+                ACC;
+            uint256 debt = cr.rewardDebt[lp];
+
+            if (accrued > debt) {
+                uint256 pending = accrued - debt;
+
+                // Move reward-pool shares from the holder to the LP (no token transfer).
+                TokenPool storage rewardPool = tokenPool[rewardAssetId];
+                address holder = _crossHolder(earningAssetId, rewardAssetId);
+
+                require(
+                    rewardPool.base.shares[holder] >= pending,
+                    "holder short"
+                );
+                unchecked {
+                    rewardPool.base.shares[holder] -= pending;
+                }
+                rewardPool.base.shares[lp] += pending;
+
+                // Update debt to current accrued
+                cr.rewardDebt[lp] = accrued;
+            } else {
+                // Still sync debt to accrued (noop)
+                cr.rewardDebt[lp] = accrued;
+            }
+        }
+    }
+
+    // ----------------------------
+    // Internals: "auto-claim everything" + "sync everything"
+    // ----------------------------
+    function _autoClaimAll(
+        bytes32 assetId,
+        address lp,
+        TokenPool storage p
+    ) internal {
+        // 1) swap-fee USDC-share rewards
+        _autoClaimSwapFees(assetId, lp, p);
+        // 2) cross-pool migrated token-share rewards
+        _autoClaimCrossRewards(assetId, lp);
+    }
+
+    function _syncAllDebts(
+        bytes32 assetId,
+        address lp,
+        TokenPool storage p
+    ) internal {
+        // swap-fee debt
+        _syncRewardDebt(assetId, lp, p);
+        // cross debts (for all active reward assets)
+        bytes32[] storage list = activeRewardAssets[assetId];
+        uint256 n = list.length;
+        for (uint256 i = 0; i < n; i++) {
+            _syncCrossDebt(assetId, list[i], lp);
+        }
     }
 
     // ----------------------------
