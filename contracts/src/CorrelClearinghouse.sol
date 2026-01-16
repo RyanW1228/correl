@@ -69,6 +69,20 @@ contract CorrelClearinghouse is ERC1155Holder {
     mapping(bytes32 => mapping(bytes32 => bool)) private isActiveRewardAsset; // E => R => bool
 
     // ----------------------------
+    // Cross-pool migration where the EARNING pool is the USDC pool
+    // ----------------------------
+    // Here, "earning shares" are USDC-pool shares (usdcPool.shares[lp]).
+    // Reward pools are token pools (tokenPool[rewardAssetId]).
+    // We reuse CrossReward (accumulator + per-LP debt), but keyed differently.
+    bytes32 private constant USDC_EARNING_POOL_ID =
+        keccak256("CORREL_USDC_POOL");
+
+    mapping(bytes32 => CrossReward) private usdcCrossReward; // rewardAssetId => CrossReward
+
+    bytes32[] private usdcActiveRewardAssets; // [rewardAssetId...]
+    mapping(bytes32 => bool) private usdcIsActiveRewardAsset; // rewardAssetId => active?
+
+    // ----------------------------
     // Token pool = base pool + swap-fee distribution state
     // ----------------------------
     struct TokenPool {
@@ -334,6 +348,8 @@ contract CorrelClearinghouse is ERC1155Holder {
         uint256 amount
     ) external returns (uint256 sharesMinted) {
         require(amount > 0, "amt=0");
+        // auto-claim USDC->token cross rewards BEFORE share balance changes
+        _autoClaimUsdcCrossRewards(msg.sender);
 
         uint256 balBefore = usdcPoolBalance();
         uint256 S = usdcPool.totalShares;
@@ -354,6 +370,9 @@ contract CorrelClearinghouse is ERC1155Holder {
         usdcPool.totalShares = S + sharesMinted;
         usdcPool.shares[msg.sender] += sharesMinted;
 
+        // sync debts AFTER share balance changes
+        _syncUsdcCrossDebts(msg.sender);
+
         emit DepositedUsdc(msg.sender, amount, sharesMinted);
     }
 
@@ -361,6 +380,9 @@ contract CorrelClearinghouse is ERC1155Holder {
         uint256 sharesBurned
     ) external returns (uint256 amountOut) {
         require(sharesBurned > 0, "shares=0");
+
+        // auto-claim USDC->token cross rewards BEFORE share balance changes
+        _autoClaimUsdcCrossRewards(msg.sender);
 
         uint256 userShares = usdcPool.shares[msg.sender];
         require(userShares >= sharesBurned, "insufficient shares");
@@ -379,6 +401,9 @@ contract CorrelClearinghouse is ERC1155Holder {
             usdcPool.shares[msg.sender] = userShares - sharesBurned;
             usdcPool.totalShares = S - sharesBurned;
         }
+
+        // sync debts AFTER share balance changes
+        _syncUsdcCrossDebts(msg.sender);
 
         require(usdc.transfer(msg.sender, amountOut), "usdc transfer failed");
         emit WithdrawnUsdc(msg.sender, sharesBurned, amountOut);
@@ -721,6 +746,10 @@ contract CorrelClearinghouse is ERC1155Holder {
             ""
         );
 
+        // NEW: USDC LPs earn token-pool shares representing the incoming redeem legs
+        _creditIncomingTokenToUsdcEarnersAsShares(L.posAssetId, L.qtyPairs);
+        _creditIncomingTokenToUsdcEarnersAsShares(L.negAssetId, L.qtyPairs);
+
         // pay net USDC
         if (L.netUsdc > 0) {
             require(usdc.transfer(L.taker, L.netUsdc), "payout failed");
@@ -802,6 +831,68 @@ contract CorrelClearinghouse is ERC1155Holder {
         if (isActiveRewardAsset[earningAssetId][rewardAssetId]) return;
         isActiveRewardAsset[earningAssetId][rewardAssetId] = true;
         activeRewardAssets[earningAssetId].push(rewardAssetId);
+    }
+
+    function _activateUsdcRewardAssetIfNeeded(bytes32 rewardAssetId) internal {
+        if (usdcIsActiveRewardAsset[rewardAssetId]) return;
+        usdcIsActiveRewardAsset[rewardAssetId] = true;
+        usdcActiveRewardAssets.push(rewardAssetId);
+    }
+
+    /**
+     * USDC pool is the EARNING pool.
+     * Reward pool is a TOKEN pool (rewardAssetId).
+     *
+     * Called when tokens arrive into the contract (e.g. redeem),
+     * to attribute those incoming tokens to USDC LPs as reward-pool shares.
+     */
+    function _creditIncomingTokenToUsdcEarnersAsShares(
+        bytes32 rewardAssetId,
+        uint256 incomingQty
+    ) internal {
+        _requireAsset(rewardAssetId);
+        require(incomingQty > 0, "qty=0");
+
+        // USDC LPs must exist
+        require(usdcPool.totalShares > 0, "no usdc LPs");
+
+        // Ensure reward asset is active (so future USDC LP interactions sync/claim safely)
+        _activateUsdcRewardAssetIfNeeded(rewardAssetId);
+
+        // Mint reward-asset pool shares equivalent to the incoming tokens.
+        // Tokens already arrived, so balance-before-incoming = currentBalance - incomingQty.
+        TokenPool storage rewardPool = tokenPool[rewardAssetId];
+        uint256 balBeforeIncoming = tokenPoolBalance(rewardAssetId) -
+            incomingQty;
+        uint256 S = rewardPool.base.totalShares;
+
+        uint256 mintedRewardPoolShares;
+        if (S == 0) {
+            mintedRewardPoolShares = incomingQty; // 1 share per 1 token base unit
+        } else {
+            require(balBeforeIncoming > 0, "bad reward bal");
+            mintedRewardPoolShares = (incomingQty * S) / balBeforeIncoming;
+            require(mintedRewardPoolShares > 0, "mint=0");
+        }
+
+        // Shares must exist immediately, so mint into totalShares now
+        rewardPool.base.totalShares = S + mintedRewardPoolShares;
+
+        // Assign to deterministic holder representing (USDC pool -> reward token pool)
+        address holder = _crossHolder(USDC_EARNING_POOL_ID, rewardAssetId);
+        rewardPool.base.shares[holder] += mintedRewardPoolShares;
+
+        // Attribute those holder-owned rewardPool shares to USDC LPs via accumulator
+        CrossReward storage cr = usdcCrossReward[rewardAssetId];
+        cr.accRewardSharesPerEarnShare +=
+            (mintedRewardPoolShares * ACC) /
+            usdcPool.totalShares;
+
+        emit CrossPoolShareCredited(
+            USDC_EARNING_POOL_ID,
+            rewardAssetId,
+            mintedRewardPoolShares
+        );
     }
 
     function _crossHolder(
@@ -905,6 +996,55 @@ contract CorrelClearinghouse is ERC1155Holder {
     }
 
     // ----------------------------
+    // Manual claim: USDC-pool cross rewards (redeem legs -> token-pool shares)
+    // ----------------------------
+    function claimUsdcCrossRewards() external {
+        // This does NOT change usdcPool.shares[msg.sender].
+        // It only moves reward-pool shares from the deterministic holder bucket to msg.sender.
+        _autoClaimUsdcCrossRewards(msg.sender);
+
+        // After claiming, sync debts so future pending math is correct.
+        _syncUsdcCrossDebts(msg.sender);
+    }
+
+    function claimUsdcCrossRewardsFor(
+        bytes32[] calldata rewardAssetIds
+    ) external {
+        uint256 m = rewardAssetIds.length;
+        require(m > 0, "empty");
+
+        uint256 lpEarnShares = usdcPool.shares[msg.sender];
+
+        for (uint256 i = 0; i < m; i++) {
+            bytes32 rewardAssetId = rewardAssetIds[i];
+            _requireAsset(rewardAssetId);
+
+            CrossReward storage cr = usdcCrossReward[rewardAssetId];
+
+            uint256 accrued = (lpEarnShares * cr.accRewardSharesPerEarnShare) /
+                ACC;
+            uint256 debt = cr.rewardDebt[msg.sender];
+            if (accrued <= debt) {
+                cr.rewardDebt[msg.sender] = accrued; // still sync
+                continue;
+            }
+
+            uint256 pending = accrued - debt;
+
+            TokenPool storage rewardPool = tokenPool[rewardAssetId];
+            address holder = _crossHolder(USDC_EARNING_POOL_ID, rewardAssetId);
+
+            require(rewardPool.base.shares[holder] >= pending, "holder short");
+            unchecked {
+                rewardPool.base.shares[holder] -= pending;
+            }
+            rewardPool.base.shares[msg.sender] += pending;
+
+            cr.rewardDebt[msg.sender] = accrued;
+        }
+    }
+
+    // ----------------------------
     // Internals: Reward accounting helpers (cross-pool migrated token shares)
     // ----------------------------
     function _pendingCrossRewardShares(
@@ -977,6 +1117,61 @@ contract CorrelClearinghouse is ERC1155Holder {
                 // Still sync debt to accrued (noop)
                 cr.rewardDebt[lp] = accrued;
             }
+        }
+    }
+
+    function _autoClaimUsdcCrossRewards(address lp) internal {
+        uint256 n = usdcActiveRewardAssets.length;
+        if (n == 0) return;
+
+        uint256 lpEarnShares = usdcPool.shares[lp];
+
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 rewardAssetId = usdcActiveRewardAssets[i];
+            CrossReward storage cr = usdcCrossReward[rewardAssetId];
+
+            uint256 accrued = (lpEarnShares * cr.accRewardSharesPerEarnShare) /
+                ACC;
+            uint256 debt = cr.rewardDebt[lp];
+
+            if (accrued > debt) {
+                uint256 pending = accrued - debt;
+
+                TokenPool storage rewardPool = tokenPool[rewardAssetId];
+                address holder = _crossHolder(
+                    USDC_EARNING_POOL_ID,
+                    rewardAssetId
+                );
+
+                require(
+                    rewardPool.base.shares[holder] >= pending,
+                    "holder short"
+                );
+                unchecked {
+                    rewardPool.base.shares[holder] -= pending;
+                }
+                rewardPool.base.shares[lp] += pending;
+
+                cr.rewardDebt[lp] = accrued;
+            } else {
+                cr.rewardDebt[lp] = accrued;
+            }
+        }
+    }
+
+    function _syncUsdcCrossDebts(address lp) internal {
+        uint256 n = usdcActiveRewardAssets.length;
+        if (n == 0) return;
+
+        uint256 lpEarnShares = usdcPool.shares[lp];
+
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 rewardAssetId = usdcActiveRewardAssets[i];
+            CrossReward storage cr = usdcCrossReward[rewardAssetId];
+
+            cr.rewardDebt[lp] =
+                (lpEarnShares * cr.accRewardSharesPerEarnShare) /
+                ACC;
         }
     }
 
