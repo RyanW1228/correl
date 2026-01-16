@@ -210,6 +210,20 @@ contract CorrelClearinghouse is ERC1155Holder {
     // ----------------------------
     uint256 private constant ACC = 1e18;
 
+    // Fee (hard-coded): 50 bps = 0.50%
+    uint256 public constant FEE_BPS = 50;
+    uint256 public constant BPS_DENOM = 10_000;
+
+    // Fee in USDC base units from a USDC-notional amount (also base units).
+    // Using ceil so we never undercharge by rounding down.
+    function _feeFromNotional(
+        uint256 notionalUsdc
+    ) internal pure returns (uint256) {
+        return (notionalUsdc * FEE_BPS + (BPS_DENOM - 1)) / BPS_DENOM;
+    }
+
+    uint256 public constant MAX_LOCK_DURATION = 120; // 2 minutes
+
     // ----------------------------
     // Constructor / Admin
     // ----------------------------
@@ -522,18 +536,25 @@ contract CorrelClearinghouse is ERC1155Holder {
     // ----------------------------
     function lockSwap(
         bytes32 lockId,
-        address taker,
         bytes32 fromAssetId,
         bytes32 toAssetId,
         uint256 qty,
         uint256 feeUsdc,
         uint256 deadline
-    ) external onlyAdmin {
+    ) external {
         require(lockId != bytes32(0), "lockId=0");
         require(locks[lockId].taker == address(0), "lock exists");
-        require(taker != address(0), "taker=0");
         require(qty > 0, "qty=0");
+        uint256 expectedFee = _feeFromNotional(qty);
+        require(feeUsdc == expectedFee, "bad fee");
+
         require(deadline >= block.timestamp, "deadline<now");
+        require(
+            deadline <= block.timestamp + MAX_LOCK_DURATION,
+            "deadline too far"
+        );
+
+        address taker = msg.sender;
 
         AssetInfo memory fromA = _requireAsset(fromAssetId);
         AssetInfo memory toA = _requireAsset(toAssetId);
@@ -570,19 +591,23 @@ contract CorrelClearinghouse is ERC1155Holder {
 
     function lockRedeem(
         bytes32 lockId,
-        address taker,
         bytes32 posAssetId,
         bytes32 negAssetId,
         uint256 qtyPairs,
         uint256 netUsdc,
         uint256 feeUsdc,
         uint256 deadline
-    ) external onlyAdmin {
+    ) external {
         require(lockId != bytes32(0), "lockId=0");
         require(locks[lockId].taker == address(0), "lock exists");
-        require(taker != address(0), "taker=0");
         require(qtyPairs > 0, "pairs=0");
         require(deadline >= block.timestamp, "deadline<now");
+        require(
+            deadline <= block.timestamp + MAX_LOCK_DURATION,
+            "deadline too far"
+        );
+
+        address taker = msg.sender;
 
         AssetInfo memory posA = _requireAsset(posAssetId);
         AssetInfo memory negA = _requireAsset(negAssetId);
@@ -592,7 +617,9 @@ contract CorrelClearinghouse is ERC1155Holder {
         require(posA.polarity == Polarity.POS, "pos not POS");
         require(negA.polarity == Polarity.NEG, "neg not NEG");
 
-        require(netUsdc + feeUsdc == qtyPairs, "bad payout split");
+        uint256 expectedFee = _feeFromNotional(qtyPairs);
+        require(feeUsdc == expectedFee, "bad fee");
+        require(netUsdc == qtyPairs - expectedFee, "bad net");
 
         // Reserve liquidity from the USDC pool (net payout only)
         uint256 B = usdcPoolBalance();
