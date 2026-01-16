@@ -97,6 +97,13 @@ contract CorrelClearinghouse is ERC1155Holder {
     mapping(bytes32 => TokenPool) private tokenPool; // assetId -> TokenPool
 
     // ----------------------------
+    // LP position tracking (needed for withdrawAll + "show all my tokens" view)
+    // ----------------------------
+    mapping(address => bytes32[]) private lpTokenAssets; // LP -> assetIds they have token pool shares in
+    mapping(address => mapping(bytes32 => uint256))
+        private lpTokenAssetIndexPlus1; // LP -> assetId -> index+1 (0 = not present)
+
+    // ----------------------------
     // Locks (quote-time reservation)
     // ----------------------------
     enum LockKind {
@@ -277,6 +284,116 @@ contract CorrelClearinghouse is ERC1155Holder {
     // Views (so you can inspect state easily)
     // ----------------------------
 
+    function lpPositions(
+        address lp
+    )
+        external
+        view
+        returns (
+            uint256 usdcShares,
+            uint256 usdcWithdrawable,
+            bytes32[] memory assetIds,
+            uint256[] memory tokenShares,
+            uint256[] memory tokenWithdrawableQty
+        )
+    {
+        // USDC side
+        usdcShares = usdcPool.shares[lp];
+        {
+            uint256 B = usdcPoolBalance();
+            uint256 S = usdcPool.totalShares;
+            uint256 amountOut = (S == 0) ? 0 : (usdcShares * B) / S;
+
+            uint256 available = (B > usdcPool.locked)
+                ? (B - usdcPool.locked)
+                : 0;
+            usdcWithdrawable = (amountOut <= available) ? amountOut : 0;
+        }
+
+        // Token side
+        assetIds = lpTokenAssets[lp];
+        uint256 n = assetIds.length;
+
+        tokenShares = new uint256[](n);
+        tokenWithdrawableQty = new uint256[](n);
+
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 assetId = assetIds[i];
+            TokenPool storage p = tokenPool[assetId];
+
+            uint256 s = p.base.shares[lp];
+            tokenShares[i] = s;
+
+            if (s == 0) {
+                tokenWithdrawableQty[i] = 0;
+                continue;
+            }
+
+            uint256 B = tokenPoolBalance(assetId);
+            uint256 S = p.base.totalShares;
+
+            uint256 qtyOut = (S == 0) ? 0 : (s * B) / S;
+            uint256 available = (B > p.base.locked) ? (B - p.base.locked) : 0;
+
+            tokenWithdrawableQty[i] = (qtyOut <= available) ? qtyOut : 0;
+        }
+    }
+
+    /**
+     * Pending (unclaimed) USDC->token cross rewards for a USDC LP.
+     * Returns one entry per rewardAssetId in usdcActiveRewardAssets.
+     */
+    function usdcCrossPendingAll(
+        address lp
+    )
+        external
+        view
+        returns (
+            bytes32[] memory rewardAssetIds,
+            uint256[] memory pendingShares
+        )
+    {
+        uint256 n = usdcActiveRewardAssets.length;
+        rewardAssetIds = new bytes32[](n);
+        pendingShares = new uint256[](n);
+
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 r = usdcActiveRewardAssets[i];
+            rewardAssetIds[i] = r;
+            pendingShares[i] = _pendingUsdcCrossRewardShares(r, lp);
+        }
+    }
+
+    /**
+     * Pending (unclaimed) token->token cross rewards for a token LP in a given earning pool.
+     * Returns one entry per rewardAssetId in activeRewardAssets[earningAssetId].
+     */
+    function tokenCrossPendingAll(
+        bytes32 earningAssetId,
+        address lp
+    )
+        external
+        view
+        returns (
+            bytes32[] memory rewardAssetIds,
+            uint256[] memory pendingShares
+        )
+    {
+        _requireAsset(earningAssetId);
+
+        bytes32[] storage list = activeRewardAssets[earningAssetId];
+        uint256 n = list.length;
+
+        rewardAssetIds = new bytes32[](n);
+        pendingShares = new uint256[](n);
+
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 r = list[i];
+            rewardAssetIds[i] = r;
+            pendingShares[i] = _pendingCrossRewardShares(earningAssetId, r, lp);
+        }
+    }
+
     // USDC pool
     function usdcPoolSharesOf(address lp) external view returns (uint256) {
         return usdcPool.shares[lp];
@@ -333,6 +450,12 @@ contract CorrelClearinghouse is ERC1155Holder {
         return _pendingUsdcShares(assetId, lp);
     }
 
+    function lpTokenAssetsOf(
+        address lp
+    ) external view returns (bytes32[] memory) {
+        return lpTokenAssets[lp];
+    }
+
     // Cross migration views
     function activeRewardAssetsFor(
         bytes32 earningAssetId
@@ -348,6 +471,14 @@ contract CorrelClearinghouse is ERC1155Holder {
         _requireAsset(earningAssetId);
         _requireAsset(rewardAssetId);
         return _pendingCrossRewardShares(earningAssetId, rewardAssetId, lp);
+    }
+
+    function pendingUsdcCrossRewardPoolShares(
+        bytes32 rewardAssetId,
+        address lp
+    ) external view returns (uint256) {
+        _requireAsset(rewardAssetId);
+        return _pendingUsdcCrossRewardShares(rewardAssetId, lp);
     }
 
     function tokenPoolBalance(bytes32 assetId) public view returns (uint256) {
@@ -393,12 +524,19 @@ contract CorrelClearinghouse is ERC1155Holder {
     function withdrawUsdc(
         uint256 sharesBurned
     ) external returns (uint256 amountOut) {
+        return _withdrawUsdcFor(msg.sender, sharesBurned);
+    }
+
+    function _withdrawUsdcFor(
+        address lp,
+        uint256 sharesBurned
+    ) internal returns (uint256 amountOut) {
         require(sharesBurned > 0, "shares=0");
 
         // auto-claim USDC->token cross rewards BEFORE share balance changes
-        _autoClaimUsdcCrossRewards(msg.sender);
+        _autoClaimUsdcCrossRewards(lp);
 
-        uint256 userShares = usdcPool.shares[msg.sender];
+        uint256 userShares = usdcPool.shares[lp];
         require(userShares >= sharesBurned, "insufficient shares");
 
         uint256 B = usdcPoolBalance();
@@ -412,15 +550,15 @@ contract CorrelClearinghouse is ERC1155Holder {
         require(amountOut <= available, "locked");
 
         unchecked {
-            usdcPool.shares[msg.sender] = userShares - sharesBurned;
+            usdcPool.shares[lp] = userShares - sharesBurned;
             usdcPool.totalShares = S - sharesBurned;
         }
 
         // sync debts AFTER share balance changes
-        _syncUsdcCrossDebts(msg.sender);
+        _syncUsdcCrossDebts(lp);
 
-        require(usdc.transfer(msg.sender, amountOut), "usdc transfer failed");
-        emit WithdrawnUsdc(msg.sender, sharesBurned, amountOut);
+        require(usdc.transfer(lp, amountOut), "usdc transfer failed");
+        emit WithdrawnUsdc(lp, sharesBurned, amountOut);
     }
 
     // ----------------------------
@@ -457,6 +595,9 @@ contract CorrelClearinghouse is ERC1155Holder {
         p.base.totalShares = S + sharesMinted;
         p.base.shares[msg.sender] += sharesMinted;
 
+        // track this asset so we can enumerate positions later
+        _trackLpTokenAsset(msg.sender, assetId);
+
         // sync debts after share change
         _syncAllDebts(assetId, msg.sender, p);
 
@@ -467,15 +608,23 @@ contract CorrelClearinghouse is ERC1155Holder {
         bytes32 assetId,
         uint256 sharesBurned
     ) external returns (uint256 qtyOut) {
+        return _withdrawTokenFor(msg.sender, assetId, sharesBurned);
+    }
+
+    function _withdrawTokenFor(
+        address lp,
+        bytes32 assetId,
+        uint256 sharesBurned
+    ) internal returns (uint256 qtyOut) {
         require(sharesBurned > 0, "shares=0");
         AssetInfo memory a = _requireAsset(assetId);
 
         TokenPool storage p = tokenPool[assetId];
 
         // auto-claim ALL entitlements before share change (prevents retroactive claims)
-        _autoClaimAll(assetId, msg.sender, p);
+        _autoClaimAll(assetId, lp, p);
 
-        uint256 userShares = p.base.shares[msg.sender];
+        uint256 userShares = p.base.shares[lp];
         require(userShares >= sharesBurned, "insufficient shares");
 
         uint256 B = tokenPoolBalance(assetId);
@@ -489,21 +638,45 @@ contract CorrelClearinghouse is ERC1155Holder {
         require(qtyOut <= available, "locked");
 
         unchecked {
-            p.base.shares[msg.sender] = userShares - sharesBurned;
+            p.base.shares[lp] = userShares - sharesBurned;
             p.base.totalShares = S - sharesBurned;
         }
 
-        // sync debts after share change
-        _syncAllDebts(assetId, msg.sender, p);
+        // if fully exited, stop tracking this assetId
+        if (p.base.shares[lp] == 0) {
+            _untrackLpTokenAsset(lp, assetId);
+        }
 
-        a.token.safeTransferFrom(
-            address(this),
-            msg.sender,
-            a.tokenId,
-            qtyOut,
-            ""
-        );
-        emit WithdrawnToken(assetId, msg.sender, sharesBurned, qtyOut);
+        // sync debts after share change
+        _syncAllDebts(assetId, lp, p);
+
+        a.token.safeTransferFrom(address(this), lp, a.tokenId, qtyOut, "");
+        emit WithdrawnToken(assetId, lp, sharesBurned, qtyOut);
+    }
+
+    function withdrawAll() external {
+        // 1) Claim USDC->token cross rewards into actual token-pool shares first
+        // so we don't miss any token positions
+        _autoClaimUsdcCrossRewards(msg.sender);
+        _syncUsdcCrossDebts(msg.sender);
+
+        // 2) Snapshot list because withdrawing will mutate/untrack
+        bytes32[] memory list = lpTokenAssets[msg.sender];
+
+        // 3) Withdraw all token pool positions (full share balance)
+        for (uint256 i = 0; i < list.length; i++) {
+            bytes32 assetId = list[i];
+            uint256 s = tokenPool[assetId].base.shares[msg.sender];
+            if (s > 0) {
+                _withdrawTokenFor(msg.sender, assetId, s);
+            }
+        }
+
+        // 4) Withdraw all USDC shares
+        uint256 us = usdcPool.shares[msg.sender];
+        if (us > 0) {
+            _withdrawUsdcFor(msg.sender, us);
+        }
     }
 
     // ----------------------------
@@ -1065,6 +1238,9 @@ contract CorrelClearinghouse is ERC1155Holder {
             unchecked {
                 rewardPool.base.shares[holder] -= pending;
             }
+            if (pending > 0 && rewardPool.base.shares[msg.sender] == 0) {
+                _trackLpTokenAsset(msg.sender, rewardAssetId);
+            }
             rewardPool.base.shares[msg.sender] += pending;
 
             cr.rewardDebt[msg.sender] = accrued;
@@ -1083,6 +1259,19 @@ contract CorrelClearinghouse is ERC1155Holder {
         TokenPool storage ep = tokenPool[earningAssetId];
 
         uint256 lpEarnShares = ep.base.shares[lp];
+        uint256 accrued = (lpEarnShares * cr.accRewardSharesPerEarnShare) / ACC;
+        uint256 debt = cr.rewardDebt[lp];
+        if (accrued <= debt) return 0;
+        return accrued - debt;
+    }
+
+    function _pendingUsdcCrossRewardShares(
+        bytes32 rewardAssetId,
+        address lp
+    ) internal view returns (uint256) {
+        CrossReward storage cr = usdcCrossReward[rewardAssetId];
+
+        uint256 lpEarnShares = usdcPool.shares[lp];
         uint256 accrued = (lpEarnShares * cr.accRewardSharesPerEarnShare) / ACC;
         uint256 debt = cr.rewardDebt[lp];
         if (accrued <= debt) return 0;
@@ -1136,6 +1325,9 @@ contract CorrelClearinghouse is ERC1155Holder {
                 unchecked {
                     rewardPool.base.shares[holder] -= pending;
                 }
+                if (pending > 0 && rewardPool.base.shares[lp] == 0) {
+                    _trackLpTokenAsset(lp, rewardAssetId);
+                }
                 rewardPool.base.shares[lp] += pending;
 
                 // Update debt to current accrued
@@ -1177,6 +1369,9 @@ contract CorrelClearinghouse is ERC1155Holder {
                 unchecked {
                     rewardPool.base.shares[holder] -= pending;
                 }
+                if (pending > 0 && rewardPool.base.shares[lp] == 0) {
+                    _trackLpTokenAsset(lp, rewardAssetId);
+                }
                 rewardPool.base.shares[lp] += pending;
 
                 cr.rewardDebt[lp] = accrued;
@@ -1200,6 +1395,29 @@ contract CorrelClearinghouse is ERC1155Holder {
                 (lpEarnShares * cr.accRewardSharesPerEarnShare) /
                 ACC;
         }
+    }
+
+    function _trackLpTokenAsset(address lp, bytes32 assetId) internal {
+        if (lpTokenAssetIndexPlus1[lp][assetId] != 0) return; // already tracked
+        lpTokenAssets[lp].push(assetId);
+        lpTokenAssetIndexPlus1[lp][assetId] = lpTokenAssets[lp].length; // index+1
+    }
+
+    function _untrackLpTokenAsset(address lp, bytes32 assetId) internal {
+        uint256 idxPlus1 = lpTokenAssetIndexPlus1[lp][assetId];
+        if (idxPlus1 == 0) return; // not tracked
+
+        uint256 idx = idxPlus1 - 1;
+        uint256 lastIdx = lpTokenAssets[lp].length - 1;
+
+        if (idx != lastIdx) {
+            bytes32 lastAssetId = lpTokenAssets[lp][lastIdx];
+            lpTokenAssets[lp][idx] = lastAssetId;
+            lpTokenAssetIndexPlus1[lp][lastAssetId] = idx + 1;
+        }
+
+        lpTokenAssets[lp].pop();
+        lpTokenAssetIndexPlus1[lp][assetId] = 0;
     }
 
     // ----------------------------
