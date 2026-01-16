@@ -1,9 +1,27 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.20;
 
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {IERC1155} from "openzeppelin-contracts/contracts/token/ERC1155/IERC1155.sol";
 import {ERC1155Holder} from "openzeppelin-contracts/contracts/token/ERC1155/utils/ERC1155Holder.sol";
+
+interface IConditionalTokens {
+    function payoutDenominator(
+        bytes32 conditionId
+    ) external view returns (uint256);
+
+    function payoutNumerators(
+        bytes32 conditionId,
+        uint256 index
+    ) external view returns (uint256);
+
+    function redeemPositions(
+        IERC20 collateralToken,
+        bytes32 parentCollectionId,
+        bytes32 conditionId,
+        uint256[] calldata indexSets
+    ) external;
+}
 
 contract CorrelClearinghouse is ERC1155Holder {
     // ----------------------------
@@ -26,6 +44,11 @@ contract CorrelClearinghouse is ERC1155Holder {
         bytes32 classId; // equivalence class
         Polarity polarity; // POS/NEG
         bool exists;
+        // --- settlement metadata (CTF) ---
+        bytes32 conditionId; // CTF conditionId (lets us check resolved + redeem)
+        bytes32 parentCollectionId; // usually bytes32(0) for Polymarket
+        IERC20 collateralToken; // usually USDC.e on Polygon for Polymarket
+        uint256 indexSet; // outcome index set for this position (binary typically 1 or 2)
     }
 
     mapping(bytes32 => AssetInfo) public assets; // assetId -> info
@@ -95,6 +118,14 @@ contract CorrelClearinghouse is ERC1155Holder {
 
     // One pool per outcome token assetId
     mapping(bytes32 => TokenPool) private tokenPool; // assetId -> TokenPool
+
+    enum TokenPoolStatus {
+        ACTIVE,
+        SETTLED,
+        DORMANT
+    }
+
+    mapping(bytes32 => TokenPoolStatus) public tokenPoolStatus; // assetId -> status
 
     // ----------------------------
     // LP position tracking (needed for withdrawAll + "show all my tokens" view)
@@ -212,6 +243,8 @@ contract CorrelClearinghouse is ERC1155Holder {
         uint256 rewardPoolSharesMinted
     );
 
+    event TokenPoolSettled(bytes32 indexed assetId, uint256 usdcReceived);
+
     // ----------------------------
     // Constants
     // ----------------------------
@@ -256,20 +289,39 @@ contract CorrelClearinghouse is ERC1155Holder {
         IERC1155 token,
         uint256 tokenId,
         bytes32 classId,
-        Polarity polarity
+        Polarity polarity,
+        // --- settlement metadata ---
+        bytes32 conditionId,
+        uint256 indexSet,
+        IERC20 collateralToken,
+        bytes32 parentCollectionId
     ) external onlyAdmin {
         require(assetId != bytes32(0), "assetId=0");
         require(address(token) != address(0), "token=0");
         require(classId != bytes32(0), "classId=0");
         require(!assets[assetId].exists, "asset exists");
 
+        // settlement metadata checks
+        require(conditionId != bytes32(0), "conditionId=0");
+        require(indexSet != 0, "indexSet=0");
+        require(address(collateralToken) != address(0), "collateral=0");
+        // NOTE: parentCollectionId may legitimately be bytes32(0) for Polymarket-style positions,
+        // so we do NOT require it nonzero.
+
         assets[assetId] = AssetInfo({
             token: token,
             tokenId: tokenId,
             classId: classId,
             polarity: polarity,
-            exists: true
+            exists: true,
+            conditionId: conditionId,
+            parentCollectionId: parentCollectionId,
+            collateralToken: collateralToken,
+            indexSet: indexSet
         });
+
+        // token pools start active
+        tokenPoolStatus[assetId] = TokenPoolStatus.ACTIVE;
 
         emit AssetRegistered(
             assetId,
@@ -310,22 +362,40 @@ contract CorrelClearinghouse is ERC1155Holder {
             usdcWithdrawable = (amountOut <= available) ? amountOut : 0;
         }
 
-        // Token side
-        assetIds = lpTokenAssets[lp];
-        uint256 n = assetIds.length;
+        // Token side (FILTERED: only ACTIVE pools)
+        bytes32[] storage tracked = lpTokenAssets[lp];
 
-        tokenShares = new uint256[](n);
-        tokenWithdrawableQty = new uint256[](n);
+        // 1st pass: count active pools
+        uint256 activeCount = 0;
+        for (uint256 i = 0; i < tracked.length; i++) {
+            bytes32 id = tracked[i];
+            if (tokenPoolStatus[id] == TokenPoolStatus.ACTIVE) {
+                activeCount++;
+            }
+        }
 
-        for (uint256 i = 0; i < n; i++) {
-            bytes32 assetId = assetIds[i];
+        // Allocate outputs to activeCount only
+        assetIds = new bytes32[](activeCount);
+        tokenShares = new uint256[](activeCount);
+        tokenWithdrawableQty = new uint256[](activeCount);
+
+        // 2nd pass: fill
+        uint256 k = 0;
+        for (uint256 i = 0; i < tracked.length; i++) {
+            bytes32 assetId = tracked[i];
+            if (tokenPoolStatus[assetId] != TokenPoolStatus.ACTIVE) {
+                continue; // "like it's gone"
+            }
+
             TokenPool storage p = tokenPool[assetId];
 
             uint256 s = p.base.shares[lp];
-            tokenShares[i] = s;
+            assetIds[k] = assetId;
+            tokenShares[k] = s;
 
             if (s == 0) {
-                tokenWithdrawableQty[i] = 0;
+                tokenWithdrawableQty[k] = 0;
+                k++;
                 continue;
             }
 
@@ -335,7 +405,8 @@ contract CorrelClearinghouse is ERC1155Holder {
             uint256 qtyOut = (S == 0) ? 0 : (s * B) / S;
             uint256 available = (B > p.base.locked) ? (B - p.base.locked) : 0;
 
-            tokenWithdrawableQty[i] = (qtyOut <= available) ? qtyOut : 0;
+            tokenWithdrawableQty[k] = (qtyOut <= available) ? qtyOut : 0;
+            k++;
         }
     }
 
@@ -572,6 +643,11 @@ contract CorrelClearinghouse is ERC1155Holder {
         uint256 qty
     ) external returns (uint256 sharesMinted) {
         require(qty > 0, "qty=0");
+        require(
+            tokenPoolStatus[assetId] == TokenPoolStatus.ACTIVE,
+            "pool settled"
+        );
+
         AssetInfo memory a = _requireAsset(assetId);
 
         TokenPool storage p = tokenPool[assetId];
@@ -654,6 +730,52 @@ contract CorrelClearinghouse is ERC1155Holder {
         emit WithdrawnToken(assetId, lp, sharesBurned, qtyOut);
     }
 
+    /**
+     * Exit a SETTLED token pool "as if it's gone":
+     * - auto-claim any owed USDC-share rewards (settlement proceeds) and cross rewards
+     * - burn the LP's token-pool shares
+     * - untrack the pool so it disappears from lpPositions / withdrawAll
+     *
+     * NOTE: This does NOT transfer any ERC1155 tokens out (settled pool is expected to have ~0 balance).
+     */
+    function exitSettledTokenPool(bytes32 assetId) external {
+        _exitSettledTokenPoolFor(msg.sender, assetId);
+    }
+
+    function _exitSettledTokenPoolFor(address lp, bytes32 assetId) internal {
+        _requireAsset(assetId);
+
+        require(
+            tokenPoolStatus[assetId] == TokenPoolStatus.SETTLED,
+            "not settled"
+        );
+
+        TokenPool storage p = tokenPool[assetId];
+
+        uint256 userShares = p.base.shares[lp];
+        if (userShares == 0) {
+            // If they hold nothing, just make sure tracking is cleaned up.
+            _untrackLpTokenAsset(lp, assetId);
+            return;
+        }
+
+        // Claim everything FIRST (settlement proceeds are distributed via usdcShareBucket/acc)
+        _autoClaimAll(assetId, lp, p);
+
+        // Burn their shares (no ERC1155 transfer)
+        require(p.base.totalShares >= userShares, "bad totalShares");
+        unchecked {
+            p.base.shares[lp] = 0;
+            p.base.totalShares -= userShares;
+        }
+
+        // Remove from enumeration (so it "disappears")
+        _untrackLpTokenAsset(lp, assetId);
+
+        // After share balance changes, sync debts (sets rewardDebt to 0 and cross debts to current accrued)
+        _syncAllDebts(assetId, lp, p);
+    }
+
     function withdrawAll() external {
         // 1) Claim USDC->token cross rewards into actual token-pool shares first
         // so we don't miss any token positions
@@ -667,8 +789,18 @@ contract CorrelClearinghouse is ERC1155Holder {
         for (uint256 i = 0; i < list.length; i++) {
             bytes32 assetId = list[i];
             uint256 s = tokenPool[assetId].base.shares[msg.sender];
-            if (s > 0) {
+            if (s == 0) continue;
+
+            TokenPoolStatus st = tokenPoolStatus[assetId];
+
+            if (st == TokenPoolStatus.ACTIVE) {
                 _withdrawTokenFor(msg.sender, assetId, s);
+            } else if (st == TokenPoolStatus.SETTLED) {
+                // burn shares + untrack, no token transfer
+                _exitSettledTokenPoolFor(msg.sender, assetId);
+            } else {
+                // DORMANT: treat as gone (best-effort cleanup)
+                _untrackLpTokenAsset(msg.sender, assetId);
             }
         }
 
@@ -731,6 +863,10 @@ contract CorrelClearinghouse is ERC1155Holder {
 
         AssetInfo memory fromA = _requireAsset(fromAssetId);
         AssetInfo memory toA = _requireAsset(toAssetId);
+        require(
+            tokenPoolStatus[toAssetId] == TokenPoolStatus.ACTIVE,
+            "to pool settled"
+        );
 
         require(fromAssetId != toAssetId, "same asset");
         require(fromA.classId == toA.classId, "class mismatch");
@@ -968,6 +1104,54 @@ contract CorrelClearinghouse is ERC1155Holder {
         );
     }
 
+    /**
+     * Permissionless settlement of a token pool once the underlying CTF condition resolves.
+     *
+     * v0+settlement behavior (Pattern A):
+     * - Redeem this contract's inventory of the position via CTF.
+     * - Any USDC received will later be credited to this pool's LPs pro-rata (next step).
+     * - Pool becomes SETTLED (deposits/swaps will be blocked in later steps).
+     */
+    function settleTokenPool(bytes32 assetId) external {
+        AssetInfo memory a = _requireAsset(assetId);
+
+        require(
+            tokenPoolStatus[assetId] == TokenPoolStatus.ACTIVE,
+            "not active"
+        );
+
+        // Must be resolved on CTF
+        // NOTE: this assumes `a.token` is the ConditionalTokens (CTF) contract.
+        IConditionalTokens ct = IConditionalTokens(address(a.token));
+        uint256 denom = ct.payoutDenominator(a.conditionId);
+        require(denom != 0, "not resolved");
+
+        // Redeem this position into collateral (USDC).
+        uint256 usdcBefore = usdc.balanceOf(address(this));
+
+        uint256[] memory indexSets = new uint256[](1);
+        indexSets[0] = a.indexSet;
+
+        ct.redeemPositions(
+            a.collateralToken,
+            a.parentCollectionId,
+            a.conditionId,
+            indexSets
+        );
+
+        uint256 usdcAfter = usdc.balanceOf(address(this));
+        uint256 received = (usdcAfter > usdcBefore)
+            ? (usdcAfter - usdcBefore)
+            : 0;
+
+        _creditUsdcProceedsToTokenPool(assetId, received);
+
+        // Mark settled (one-way)
+        tokenPoolStatus[assetId] = TokenPoolStatus.SETTLED;
+
+        emit TokenPoolSettled(assetId, received);
+    }
+
     // ----------------------------
     // Internals: Cross-pool migration (incoming token -> reward-pool shares)
     // ----------------------------
@@ -1139,6 +1323,43 @@ contract CorrelClearinghouse is ERC1155Holder {
         p.usdcShareBucket += feeShares;
 
         p.accUsdcSharesPerTokenShare += (feeShares * ACC) / p.base.totalShares;
+    }
+
+    /**
+     * Credit arbitrary USDC proceeds (e.g. settlement redemption) to a token pool's LPs,
+     * using the same mechanism as swap fees: mint USDC-pool shares into a per-pool bucket
+     * and update the per-token-share accumulator.
+     *
+     * If there are no LPs, we do nothing (USDC just remains in the USDC pool globally).
+     */
+    function _creditUsdcProceedsToTokenPool(
+        bytes32 assetId,
+        uint256 amountUsdc
+    ) internal {
+        if (amountUsdc == 0) return;
+
+        TokenPool storage p = tokenPool[assetId];
+        if (p.base.totalShares == 0) return;
+
+        // USDC already arrived, so balance-before-proceeds = currentBalance - amountUsdc
+        uint256 balBefore = usdcPoolBalance() - amountUsdc;
+        uint256 S = usdcPool.totalShares;
+
+        uint256 sharesMinted;
+        if (S == 0) {
+            sharesMinted = amountUsdc;
+        } else {
+            require(balBefore > 0, "bad usdc bal");
+            sharesMinted = (amountUsdc * S) / balBefore;
+            require(sharesMinted > 0, "shares=0");
+        }
+
+        // Mint USDC-pool shares and earmark them for this token pool
+        usdcPool.totalShares = S + sharesMinted;
+        p.usdcShareBucket += sharesMinted;
+        p.accUsdcSharesPerTokenShare +=
+            (sharesMinted * ACC) /
+            p.base.totalShares;
     }
 
     // ----------------------------
