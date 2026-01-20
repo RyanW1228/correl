@@ -30,6 +30,9 @@ export default function MarketPage() {
     title: string;
     slug?: string;
     conditionId?: string;
+
+    yesTokenId?: string; // uint256 as string
+    noTokenId?: string; // uint256 as string
     clobTokenIds?: string[];
   } | null>(null);
 

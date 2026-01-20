@@ -8,6 +8,23 @@ import { useWaitForTransactionReceipt } from "wagmi";
 
 const CORREL_ADDRESS = "0xd55963Bd90b14a2fE151C54788e58Ee84AA1F6dC" as const;
 
+// ---- Defaults for "Register Market Into Class" autofill ----
+// You can change these once and every selected market will prefill.
+// (These are admin-side UX defaults; they don't come from Polymarket.)
+
+// ---- Defaults for "Register Market Into Class" (hidden, always-on) ----
+// IMPORTANT: Fill these two with YOUR actual addresses (no guessing here).
+const DEFAULT_CTF_ADDRESS = (process.env.NEXT_PUBLIC_CTF ??
+  "") as `0x${string}`;
+
+const DEFAULT_COLLATERAL_ADDRESS = (process.env.NEXT_PUBLIC_USDC ??
+  "") as `0x${string}`;
+
+const DEFAULT_PARENT_COLLECTION_ID = ("0x" + "0".repeat(64)) as `0x${string}`;
+
+const DEFAULT_INDEXSET_YES = BigInt(1);
+const DEFAULT_INDEXSET_NO = BigInt(2);
+
 const CorrelAdminAbi = [
   {
     name: "registerAsset",
@@ -116,13 +133,6 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
   const [classIdInput, setClassIdInput] = useState<string>("");
   const [localError, setLocalError] = useState<string>("");
 
-  // required for registerAsset(...)
-  const [ctfAddress, setCtfAddress] = useState<string>(""); // IERC1155
-  const [collateralAddress, setCollateralAddress] = useState<string>(""); // IERC20
-  const [parentCollectionId, setParentCollectionId] = useState<string>(
-    "0x" + "0".repeat(64),
-  );
-
   // you told me not to guess your assetId scheme, so we input both explicitly
   const [assetIdPos, setAssetIdPos] = useState<string>(""); // bytes32
   const [assetIdNeg, setAssetIdNeg] = useState<string>(""); // bytes32
@@ -131,10 +141,6 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
   const [pickedYesTokenId, setPickedYesTokenId] = useState<string>("");
   const [pickedNoTokenId, setPickedNoTokenId] = useState<string>("");
   const [flipPolarity, setFlipPolarity] = useState<boolean>(false);
-
-  // indexSet per leg (you store this in AssetInfo)
-  const [indexSetYes, setIndexSetYes] = useState<string>("1");
-  const [indexSetNo, setIndexSetNo] = useState<string>("2");
 
   // Midpoint display (YES fetched, NO is complement from route)
   const [yesMid, setYesMid] = useState<number | null>(null);
@@ -209,17 +215,15 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
     if (!isBytes32Hex(classIdInput.trim())) return false;
     if (!isBytes32Hex(assetIdPos.trim())) return false;
     if (!isBytes32Hex(assetIdNeg.trim())) return false;
-    if (!isAddress(ctfAddress.trim())) return false;
-    if (!isAddress(collateralAddress.trim())) return false;
-    if (!isBytes32Hex(parentCollectionId.trim())) return false;
+
+    // hidden constants (must be set)
+    if (!isAddress(DEFAULT_CTF_ADDRESS)) return false;
+    if (!isAddress(DEFAULT_COLLATERAL_ADDRESS)) return false;
+    if (!isBytes32Hex(DEFAULT_PARENT_COLLECTION_ID)) return false;
 
     const yesTid = toBigIntStrict("yesTokenId", pickedYesTokenId);
     const noTid = toBigIntStrict("noTokenId", pickedNoTokenId);
     if (yesTid === null || noTid === null) return false;
-
-    const iYes = toBigIntStrict("indexSetYes", indexSetYes);
-    const iNo = toBigIntStrict("indexSetNo", indexSetNo);
-    if (iYes === null || iNo === null) return false;
 
     const cond = selectedMarket?.conditionId?.trim() ?? "";
     if (!isBytes32Hex(cond)) return false;
@@ -229,13 +233,8 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
     classIdInput,
     assetIdPos,
     assetIdNeg,
-    ctfAddress,
-    collateralAddress,
-    parentCollectionId,
     pickedYesTokenId,
     pickedNoTokenId,
-    indexSetYes,
-    indexSetNo,
     selectedMarket,
   ]);
 
@@ -269,6 +268,11 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
     setYesMid(null);
     setNoMid(null);
     setMidError("");
+
+    // If assetIds aren't set yet, generate them on market select (one-time).
+    // (Does NOT overwrite if you already typed/pasted valid bytes32s.)
+    if (!isBytes32Hex(assetIdPos.trim())) setAssetIdPos(randomBytes32());
+    if (!isBytes32Hex(assetIdNeg.trim())) setAssetIdNeg(randomBytes32());
   }, [selectedMarket]);
 
   useEffect(() => {
@@ -343,24 +347,25 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
     const classId = classIdInput.trim();
     const posId = assetIdPos.trim();
     const negId = assetIdNeg.trim();
-    const token = ctfAddress.trim();
-    const collateral = collateralAddress.trim();
-    const parent = parentCollectionId.trim();
 
-    const conditionIdRaw = selectedMarket?.conditionId?.trim() ?? "";
-    const conditionId = conditionIdRaw;
+    const token = DEFAULT_CTF_ADDRESS;
+    const collateral = DEFAULT_COLLATERAL_ADDRESS;
+    const parent = DEFAULT_PARENT_COLLECTION_ID;
 
     if (!isBytes32Hex(classId)) return setLocalError("classId must be bytes32");
     if (!isBytes32Hex(posId))
       return setLocalError("assetIdPos must be bytes32");
     if (!isBytes32Hex(negId))
       return setLocalError("assetIdNeg must be bytes32");
+
     if (!isAddress(token))
-      return setLocalError("CTF token address must be 0x + 40 hex");
+      return setLocalError("DEFAULT_CTF_ADDRESS is not set / invalid");
     if (!isAddress(collateral))
-      return setLocalError("collateral address must be 0x + 40 hex");
+      return setLocalError("DEFAULT_COLLATERAL_ADDRESS is not set / invalid");
     if (!isBytes32Hex(parent))
-      return setLocalError("parentCollectionId must be bytes32");
+      return setLocalError("DEFAULT_PARENT_COLLECTION_ID is invalid");
+
+    const conditionId = (selectedMarket?.conditionId ?? "").trim();
     if (!isBytes32Hex(conditionId))
       return setLocalError("selectedMarket.conditionId must be bytes32");
 
@@ -369,13 +374,14 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
     if (yesTid === null || noTid === null)
       return setLocalError("TokenIds must be decimal uint256 strings");
 
-    const iYes = toBigIntStrict("indexSetYes", indexSetYes);
-    const iNo = toBigIntStrict("indexSetNo", indexSetNo);
-    if (iYes === null || iNo === null)
-      return setLocalError("indexSets must be decimal uint256 strings");
+    // Fixed indexSets for Polymarket binary conditions.
+    const iYes = DEFAULT_INDEXSET_YES;
+    const iNo = DEFAULT_INDEXSET_NO;
 
     const posTokenId = flipPolarity ? noTid : yesTid;
     const negTokenId = flipPolarity ? yesTid : noTid;
+
+    // ... keep your writeContract(...) and negArgs logic exactly as you already have it
 
     // Two txs: register POS then register NEG (v0; no multicall in your contract)
     // POS = 0, NEG = 1
@@ -551,34 +557,18 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
           Register Market Into Class (POS + NEG)
         </div>
 
-        <div style={{ marginBottom: 8 }}>
-          <div>CTF (ERC-1155) address:</div>
-          <input
-            value={ctfAddress}
-            onChange={(e) => setCtfAddress(e.target.value)}
-            placeholder="0x..."
-            style={{ width: 520, maxWidth: "100%" }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 8 }}>
-          <div>Collateral (IERC20) address:</div>
-          <input
-            value={collateralAddress}
-            onChange={(e) => setCollateralAddress(e.target.value)}
-            placeholder="0x..."
-            style={{ width: 520, maxWidth: "100%" }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 8 }}>
-          <div>parentCollectionId (bytes32):</div>
-          <input
-            value={parentCollectionId}
-            onChange={(e) => setParentCollectionId(e.target.value)}
-            placeholder="0x + 64 hex chars (often 0x00..00)"
-            style={{ width: 520, maxWidth: "100%" }}
-          />
+        <div
+          style={{ marginBottom: 8, display: "flex", gap: 8, flexWrap: "wrap" }}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setAssetIdPos(randomBytes32());
+              setAssetIdNeg(randomBytes32());
+            }}
+          >
+            Generate random asset IDs
+          </button>
         </div>
 
         <div style={{ marginBottom: 8 }}>
@@ -632,24 +622,6 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
           </label>
         </div>
 
-        <div style={{ marginBottom: 8 }}>
-          <div>indexSet for Market YES (uint256):</div>
-          <input
-            value={indexSetYes}
-            onChange={(e) => setIndexSetYes(e.target.value)}
-            style={{ width: 220 }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 8 }}>
-          <div>indexSet for Market NO (uint256):</div>
-          <input
-            value={indexSetNo}
-            onChange={(e) => setIndexSetNo(e.target.value)}
-            style={{ width: 220 }}
-          />
-        </div>
-
         <div style={{ fontFamily: "monospace" }}>
           {preview ? (
             <>
@@ -659,15 +631,15 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
               <div>
                 NEG tokenId to register: {preview.negTokenId.toString()}
               </div>
+              <div>
+                Using indexSets (fixed): YES={DEFAULT_INDEXSET_YES.toString()}{" "}
+                NO=
+                {DEFAULT_INDEXSET_NO.toString()}
+              </div>
             </>
           ) : (
             <div>(Enter YES/NO tokenIds to preview)</div>
           )}
-        </div>
-
-        <div style={{ marginTop: 10, fontStyle: "italic" }}>
-          Tx 1 registers POS. Next patch: a Tx 2 button to register NEG
-          automatically right after.
         </div>
       </div>
 

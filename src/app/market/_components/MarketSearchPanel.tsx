@@ -7,8 +7,11 @@ import React, { useMemo, useState } from "react";
 type SelectedMarket = {
   title: string;
   slug?: string;
-  conditionId?: string;
-  clobTokenIds?: string[];
+  conditionId?: string; // bytes32
+
+  yesTokenId?: string; // uint256 as string
+  noTokenId?: string; // uint256 as string
+  clobTokenIds?: string[]; // fallback list for dropdown
 };
 
 type MarketInEvent = {
@@ -66,6 +69,8 @@ async function fetchMarketBySlug(slug: string): Promise<{
   raw: any;
   conditionId?: string;
   clobTokenIds?: string[];
+  yesTokenId?: string;
+  noTokenId?: string;
 }> {
   const url = `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(
     slug,
@@ -87,7 +92,10 @@ async function fetchMarketBySlug(slug: string): Promise<{
     typeof first?.conditionId === "string" ? first.conditionId : undefined;
   const clobTokenIds = normalizeTokenIds(first?.clobTokenIds);
 
-  return { raw, conditionId, clobTokenIds };
+  const yesTokenId = clobTokenIds?.[0];
+  const noTokenId = clobTokenIds?.[1];
+
+  return { raw, conditionId, clobTokenIds, yesTokenId, noTokenId };
 }
 
 type Props = {
@@ -171,21 +179,27 @@ export function MarketSearchPanel({ onSelectMarket }: Props) {
   async function onSelect(m: MarketInEvent) {
     setSearchError("");
 
+    const baseTokenIds = normalizeTokenIds(m.clobTokenIds);
     const base: SelectedMarket = {
       title: m.title,
       slug: m.slug,
       conditionId: m.conditionId,
-      clobTokenIds: m.clobTokenIds,
+      clobTokenIds: baseTokenIds,
+      yesTokenId: baseTokenIds?.[0],
+      noTokenId: baseTokenIds?.[1],
     };
 
     // Prefer to hydrate from Gamma so IDs are correct for equivalence class usage
     if (m.slug) {
       try {
         const hydrated = await fetchMarketBySlug(m.slug);
+        const pickedClob = hydrated.clobTokenIds ?? base.clobTokenIds;
         const picked: SelectedMarket = {
           ...base,
           conditionId: hydrated.conditionId ?? base.conditionId,
-          clobTokenIds: hydrated.clobTokenIds ?? base.clobTokenIds,
+          clobTokenIds: pickedClob,
+          yesTokenId: hydrated.yesTokenId ?? pickedClob?.[0] ?? base.yesTokenId,
+          noTokenId: hydrated.noTokenId ?? pickedClob?.[1] ?? base.noTokenId,
         };
 
         // Also show JSON in the debug panel
