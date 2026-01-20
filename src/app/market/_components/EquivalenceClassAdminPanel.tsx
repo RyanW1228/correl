@@ -136,8 +136,10 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
   const [indexSetYes, setIndexSetYes] = useState<string>("1");
   const [indexSetNo, setIndexSetNo] = useState<string>("2");
 
-  // Midpoint display (we'll wire this to the API route next)
-  const [midpoint, setMidpoint] = useState<string>("");
+  // Midpoint display (YES fetched, NO is complement from route)
+  const [yesMid, setYesMid] = useState<number | null>(null);
+  const [noMid, setNoMid] = useState<number | null>(null);
+  const [midError, setMidError] = useState<string>("");
 
   type RegisterAssetArgs = readonly [
     `0x${string}`, // assetId
@@ -264,8 +266,59 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
     setPickedYesTokenId(t0);
     setPickedNoTokenId(t1);
     setFlipPolarity(false);
-    setMidpoint("");
+    setYesMid(null);
+    setNoMid(null);
+    setMidError("");
   }, [selectedMarket]);
+
+  useEffect(() => {
+    const tid = pickedYesTokenId.trim();
+    if (!/^\d+$/.test(tid)) {
+      setYesMid(null);
+      setNoMid(null);
+      setMidError("");
+      return;
+    }
+
+    const controller = new AbortController();
+
+    (async () => {
+      try {
+        setMidError("");
+        const res = await fetch(
+          `/api/polymarket/midpoint?token_id=${encodeURIComponent(tid)}`,
+          { cache: "no-store", signal: controller.signal },
+        );
+
+        const data = (await res.json()) as
+          | { yesMid?: number | null; noMid?: number | null; error?: string }
+          | any;
+
+        if (!res.ok) {
+          setYesMid(null);
+          setNoMid(null);
+          setMidError(data?.error ? String(data.error) : `midpoint failed`);
+          return;
+        }
+
+        setYesMid(
+          typeof data?.yesMid === "number"
+            ? data.yesMid
+            : (data?.yesMid ?? null),
+        );
+        setNoMid(
+          typeof data?.noMid === "number" ? data.noMid : (data?.noMid ?? null),
+        );
+      } catch (e: any) {
+        if (e?.name === "AbortError") return;
+        setYesMid(null);
+        setNoMid(null);
+        setMidError("midpoint fetch failed");
+      }
+    })();
+
+    return () => controller.abort();
+  }, [pickedYesTokenId]);
 
   useEffect(() => {
     // If we have a queued NEG tx and POS is confirmed, submit NEG exactly once.
@@ -396,8 +449,29 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
               </div>
 
               <div style={{ fontFamily: "monospace", marginTop: 6 }}>
-                <div>Market YES tokenId: {pickedYesTokenId || "(missing)"}</div>
-                <div>Market NO tokenId: {pickedNoTokenId || "(missing)"}</div>
+                <div>
+                  <strong>Market YES tokenId:</strong>{" "}
+                  {pickedYesTokenId || "(missing)"}
+                </div>
+                <div style={{ marginLeft: 16, color: "#444" }}>
+                  Midpoint:{" "}
+                  {yesMid === null ? "(not loaded yet)" : yesMid.toString()}
+                </div>
+
+                <div style={{ marginTop: 8 }}>
+                  <strong>Market NO tokenId:</strong>{" "}
+                  {pickedNoTokenId || "(missing)"}
+                </div>
+                <div style={{ marginLeft: 16, color: "#444" }}>
+                  Midpoint:{" "}
+                  {noMid === null ? "(not loaded yet)" : noMid.toString()}
+                </div>
+
+                {midError && (
+                  <div style={{ marginTop: 8, color: "red" }}>
+                    Midpoint error: {midError}
+                  </div>
+                )}
               </div>
 
               <div style={{ marginTop: 10 }}>
@@ -426,17 +500,6 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
                 ) : (
                   <div>(Pick two tokenIds to preview mapping)</div>
                 )}
-              </div>
-
-              <div style={{ marginTop: 10 }}>
-                <div style={{ fontWeight: 700, marginBottom: 4 }}>
-                  Midpoint (for confirmation)
-                </div>
-                <div style={{ fontFamily: "monospace" }}>
-                  {midpoint
-                    ? midpoint
-                    : "(not loaded yet — next patch wires API route)"}
-                </div>
               </div>
             </div>
 

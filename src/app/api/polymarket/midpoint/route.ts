@@ -30,5 +30,31 @@ export async function GET(req: Request) {
   }
 
   const data = (await res.json()) as { mid?: string };
-  return NextResponse.json({ mid: data.mid ?? null });
+
+  const rawMidStr = (data.mid ?? "").trim();
+  if (!rawMidStr) {
+    return NextResponse.json({ tokenId, yesMid: null, noMid: null });
+  }
+
+  const rawMid = Number(rawMidStr);
+  if (!Number.isFinite(rawMid)) {
+    return NextResponse.json({ tokenId, yesMid: null, noMid: null });
+  }
+
+  // Polymarket midpoint is sometimes returned as 0..1, sometimes effectively cents-style.
+  // You want cents-style 0..100.
+  const yesMid = rawMid <= 1 ? rawMid * 100 : rawMid;
+
+  // Clamp to [0,100] to avoid weird upstream edge cases.
+  const yesMidClamped = Math.max(0, Math.min(100, yesMid));
+  const noMid = 100 - yesMidClamped;
+
+  // keep 4 decimals max (optional)
+  const round = (x: number) => Math.round(x * 10000) / 10000;
+
+  return NextResponse.json({
+    tokenId,
+    yesMid: round(yesMidClamped),
+    noMid: round(noMid),
+  });
 }
