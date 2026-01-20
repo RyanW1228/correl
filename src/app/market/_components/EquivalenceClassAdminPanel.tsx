@@ -36,6 +36,13 @@ function isAddress(s: string): s is `0x${string}` {
   return /^0x[0-9a-fA-F]{40}$/.test(s);
 }
 
+function isDecimalTokenId(raw: string | undefined): raw is string {
+  if (!raw) return false;
+  const t = raw.trim();
+  // tokenIds in your UI are decimal strings (not JSON arrays)
+  return /^\d+$/.test(t);
+}
+
 function toBigIntStrict(label: string, raw: string): bigint | null {
   const t = raw.trim();
   if (!t) return null;
@@ -46,6 +53,36 @@ function toBigIntStrict(label: string, raw: string): bigint | null {
   } catch {
     return null;
   }
+}
+
+function normalizeTokenIdList(raw: string[] | undefined): string[] {
+  if (!raw) return [];
+
+  const out: string[] = [];
+  for (const item of raw) {
+    const t = item.trim();
+
+    // Case: item is actually a JSON-encoded array like '["123","456"]'
+    if (t.startsWith("[") && t.endsWith("]")) {
+      try {
+        const arr = JSON.parse(t) as unknown;
+        if (Array.isArray(arr)) {
+          for (const v of arr) {
+            if (typeof v === "string" && v.trim()) out.push(v.trim());
+          }
+          continue;
+        }
+      } catch {
+        // fall through
+      }
+    }
+
+    // Normal case: item is a tokenId string
+    if (t) out.push(t);
+  }
+
+  // de-dupe while preserving order
+  return Array.from(new Set(out));
 }
 
 function randomBytes32(): `0x${string}` {
@@ -212,10 +249,17 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
   }, [pickedYesTokenId, pickedNoTokenId, flipPolarity]);
 
   useEffect(() => {
-    const t0 =
-      selectedMarket?.yesTokenId ?? selectedMarket?.clobTokenIds?.[0] ?? "";
-    const t1 =
-      selectedMarket?.noTokenId ?? selectedMarket?.clobTokenIds?.[1] ?? "";
+    const normalized = normalizeTokenIdList(selectedMarket?.clobTokenIds);
+
+    // Only trust yesTokenId/noTokenId if they are single decimal tokenIds.
+    // (Your current bug is yesTokenId sometimes being the JSON array string.)
+    const t0 = isDecimalTokenId(selectedMarket?.yesTokenId)
+      ? selectedMarket!.yesTokenId!.trim()
+      : (normalized[0] ?? "");
+
+    const t1 = isDecimalTokenId(selectedMarket?.noTokenId)
+      ? selectedMarket!.noTokenId!.trim()
+      : (normalized[1] ?? "");
 
     setPickedYesTokenId(t0);
     setPickedNoTokenId(t1);
@@ -348,41 +392,12 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
               style={{ marginTop: 12, padding: 10, border: "1px solid #000" }}
             >
               <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                Choose Market YES/NO Tokens (No Guessing)
+                Market → Class Mapping (Default + Optional Flip)
               </div>
 
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                <div>
-                  <div style={{ fontWeight: 600 }}>Market YES tokenId</div>
-                  <select
-                    value={pickedYesTokenId}
-                    onChange={(e) => setPickedYesTokenId(e.target.value)}
-                    style={{ minWidth: 520, maxWidth: "100%" }}
-                    disabled={!selectedMarket.clobTokenIds?.length}
-                  >
-                    {(selectedMarket.clobTokenIds ?? []).map((tid) => (
-                      <option key={tid} value={tid}>
-                        {tid}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <div style={{ fontWeight: 600 }}>Market NO tokenId</div>
-                  <select
-                    value={pickedNoTokenId}
-                    onChange={(e) => setPickedNoTokenId(e.target.value)}
-                    style={{ minWidth: 520, maxWidth: "100%" }}
-                    disabled={!selectedMarket.clobTokenIds?.length}
-                  >
-                    {(selectedMarket.clobTokenIds ?? []).map((tid) => (
-                      <option key={tid} value={tid}>
-                        {tid}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+              <div style={{ fontFamily: "monospace", marginTop: 6 }}>
+                <div>Market YES tokenId: {pickedYesTokenId || "(missing)"}</div>
+                <div>Market NO tokenId: {pickedNoTokenId || "(missing)"}</div>
               </div>
 
               <div style={{ marginTop: 10 }}>
