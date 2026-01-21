@@ -65,6 +65,10 @@ export default function HomePage() {
         <button>Market</button>
       </Link>
 
+      <Link href="/equiv-classes">
+        <button style={{ marginLeft: 8 }}>Equivalence Classes</button>
+      </Link>
+
       {!isConnected && (
         <div>Connect a wallet on Polygon to view lpPositions.</div>
       )}
