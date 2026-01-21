@@ -72,16 +72,24 @@ async function fetchMarketBySlug(slug: string): Promise<{
   yesTokenId?: string;
   noTokenId?: string;
 }> {
-  const url = `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(
-    slug,
-  )}`;
+  const url = `/api/polymarket/market-by-slug?slug=${encodeURIComponent(slug)}`;
 
   const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`Gamma market fetch failed (${res.status})`);
+
+  // If this fails, it’s now your own API route failing (much easier to debug).
+  if (!res.ok) {
+    let bodyText = "";
+    try {
+      bodyText = await res.text();
+    } catch {}
+    throw new Error(
+      `market-by-slug failed (${res.status})${bodyText ? `: ${bodyText}` : ""}`,
+    );
+  }
 
   const raw = await res.json();
 
-  // Gamma sometimes returns array-like, sometimes object-like. Grab "first" marketish object.
+  // Keep your existing normalization logic
   const first = Array.isArray(raw)
     ? raw[0]
     : Array.isArray((raw as any)?.markets)
@@ -90,8 +98,8 @@ async function fetchMarketBySlug(slug: string): Promise<{
 
   const conditionId =
     typeof first?.conditionId === "string" ? first.conditionId : undefined;
-  const clobTokenIds = normalizeTokenIds(first?.clobTokenIds);
 
+  const clobTokenIds = normalizeTokenIds(first?.clobTokenIds);
   const yesTokenId = clobTokenIds?.[0];
   const noTokenId = clobTokenIds?.[1];
 
@@ -136,7 +144,16 @@ export function MarketSearchPanel({ onSelectMarket }: Props) {
       )}&limit=10`;
 
       const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) throw new Error(`Search API failed (${res.status})`);
+
+      if (!res.ok) {
+        let bodyText = "";
+        try {
+          bodyText = await res.text();
+        } catch {}
+        throw new Error(
+          `Search API failed (${res.status})${bodyText ? `: ${bodyText}` : ""}`,
+        );
+      }
 
       const data = (await res.json()) as SearchApiResponse;
 
