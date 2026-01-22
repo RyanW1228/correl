@@ -1,3 +1,5 @@
+// src/app/equiv-classes/page.tsx
+
 "use client";
 
 import React, { useEffect, useState } from "react";
@@ -69,112 +71,32 @@ export default function EquivClassesPage() {
             {new Date(data.updatedAt).toLocaleString()}
           </div>
 
-          {data.classes.map((cls) => (
-            <div
-              key={cls.classId}
-              style={{
-                border: "1px solid #ddd",
-                padding: 12,
-                marginBottom: 16,
-              }}
-            >
-              <div style={{ fontWeight: 600 }}>classId: {cls.classId}</div>
-              <div style={{ fontSize: 12, marginBottom: 8 }}>
-                {(cls.pos?.length ?? 0) + (cls.neg?.length ?? 0)} assets
-              </div>
+          {data.classes.map((cls) => {
+            const href = `/equiv-classes/${encodeURIComponent(cls.classId)}`;
 
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  fontSize: 12,
-                }}
+            return (
+              <Link
+                key={cls.classId}
+                href={href}
+                style={{ textDecoration: "none", color: "inherit" }}
               >
-                <thead>
-                  <tr>
-                    <th align="left">Market</th>
-                    <th align="left">Side</th>
-                    <th align="left">Midpoint</th>
-                    <th align="left">conditionId</th>
-                    <th align="left">tokenId</th>
-                    <th align="left">Link</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {/* POS */}
-                  <tr>
-                    <td colSpan={6} style={{ paddingTop: 10, fontWeight: 600 }}>
-                      POS
-                    </td>
-                  </tr>
-                  {(cls.pos ?? []).map((m) => (
-                    <tr key={m.assetId}>
-                      <td>{m.title ?? "(no title)"}</td>
-                      <td>{m.side}</td>
-                      <td>
-                        {m.midpoint == null ? "—" : m.midpoint.toFixed(4)}
-                      </td>
-                      <td style={{ fontFamily: "monospace" }}>
-                        {short(m.conditionId)}
-                      </td>
-                      <td style={{ fontFamily: "monospace" }}>
-                        {short(m.tokenId)}
-                      </td>
-                      <td>
-                        {m.polymarketUrl ? (
-                          <a
-                            href={m.polymarketUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            ↗
-                          </a>
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-
-                  {/* NEG */}
-                  <tr>
-                    <td colSpan={6} style={{ paddingTop: 10, fontWeight: 600 }}>
-                      NEG
-                    </td>
-                  </tr>
-                  {(cls.neg ?? []).map((m) => (
-                    <tr key={m.assetId}>
-                      <td>{m.title ?? "(no title)"}</td>
-                      <td>{m.side}</td>
-                      <td>
-                        {m.midpoint == null ? "—" : m.midpoint.toFixed(4)}
-                      </td>
-                      <td style={{ fontFamily: "monospace" }}>
-                        {short(m.conditionId)}
-                      </td>
-                      <td style={{ fontFamily: "monospace" }}>
-                        {short(m.tokenId)}
-                      </td>
-                      <td>
-                        {m.polymarketUrl ? (
-                          <a
-                            href={m.polymarketUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            ↗
-                          </a>
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
+                <div
+                  style={{
+                    border: "1px solid #ddd",
+                    padding: 12,
+                    marginBottom: 16,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ fontWeight: 600 }}>classId: {cls.classId}</div>
+                  <div style={{ fontSize: 12, marginBottom: 8 }}>
+                    {(cls.pos?.length ?? 0) + (cls.neg?.length ?? 0)} assets
+                  </div>
+                  {/* TODO: paste your existing table back here (removed placeholder "...") */}
+                </div>
+              </Link>
+            );
+          })}
         </>
       )}
     </main>
