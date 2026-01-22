@@ -10,6 +10,14 @@ type GammaMarket = {
   slug?: string;
   conditionId?: string;
   clobTokenIds?: string[] | string;
+
+  // add these (best-effort; depends on Gamma payload)
+  active?: boolean;
+  closed?: boolean;
+  resolved?: boolean;
+  isResolved?: boolean;
+  outcome?: string | null; // sometimes present when resolved
+  endDate?: string | null;
 };
 
 type GammaEvent = {
@@ -19,6 +27,21 @@ type GammaEvent = {
   slug?: string;
   markets?: Array<GammaMarket | null> | null;
 };
+
+function isResolvedOrClosed(m: GammaMarket): boolean {
+  // explicit booleans if present
+  if (m.isResolved === true) return true;
+  if (m.resolved === true) return true;
+  if (m.closed === true) return true;
+
+  // some APIs use active=false to mean closed
+  if (m.active === false) return true;
+
+  // sometimes resolved markets have an "outcome"
+  if (typeof m.outcome === "string" && m.outcome.trim()) return true;
+
+  return false;
+}
 
 function firstNonEmpty(...xs: Array<string | undefined | null>) {
   for (const x of xs) {
@@ -79,6 +102,7 @@ export async function GET(req: Request) {
       const markets = marketsRaw
         .map((m) => {
           if (!m) return null;
+          if (isResolvedOrClosed(m)) return null;
 
           const title = firstNonEmpty(m.question, m.marketTitle, String(m.id));
           if (!title) return null;
