@@ -4,6 +4,11 @@
 
 import React, { useEffect, useMemo, useState, use } from "react";
 import Link from "next/link";
+import { useAccount, useChainId } from "wagmi";
+import { polygon } from "wagmi/chains";
+
+// Admin wallet (same as /market)
+const ADMIN_ADDRESS = "0x1E025245946191c40DcE3bBb3784494eD79BAe16";
 
 type Asset = {
   assetId: string;
@@ -41,6 +46,15 @@ export default function EquivClassWorkspacePage({
   const { classId: rawClassId } = use(params);
   const classId = decodeURIComponent(rawClassId);
 
+  const { address, isConnected } = useAccount();
+  const chainId = useChainId();
+  const onPolygon = chainId === polygon.id;
+
+  const isAdmin = useMemo(() => {
+    if (!isConnected || !onPolygon || !address) return false;
+    return address.toLowerCase() === ADMIN_ADDRESS.toLowerCase();
+  }, [address, isConnected, onPolygon]);
+
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -70,10 +84,26 @@ export default function EquivClassWorkspacePage({
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      <div style={{ marginBottom: 12 }}>
+      <div
+        style={{
+          marginBottom: 12,
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+        }}
+      >
         <Link href="/equiv-classes">
           <button>← Back</button>
         </Link>
+
+        {isAdmin && (
+          <Link
+            href={`/market?classId=${encodeURIComponent(classId)}`}
+            title="Add a market into this equivalence class"
+          >
+            <button>＋ Add Market</button>
+          </Link>
+        )}
       </div>
 
       <h1>Equivalence Class Workspace</h1>

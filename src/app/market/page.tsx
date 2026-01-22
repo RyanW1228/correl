@@ -4,6 +4,7 @@
 
 import React, { useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useAccount, useChainId } from "wagmi";
 import { polygon } from "wagmi/chains";
 
@@ -17,6 +18,9 @@ export default function MarketPage() {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const onPolygon = chainId === polygon.id;
+
+  const searchParams = useSearchParams();
+  const prefillClassId = searchParams.get("classId");
 
   const isAdmin = useMemo(() => {
     if (!isConnected || !onPolygon || !address) return false;
@@ -66,7 +70,10 @@ export default function MarketPage() {
       {/* Existing Admin UI */}
       {/* ------------------------- */}
       {isAdmin && (
-        <EquivalenceClassAdminPanel selectedMarket={selectedMarket} />
+        <EquivalenceClassAdminPanel
+          selectedMarket={selectedMarket}
+          prefillClassId={prefillClassId}
+        />
       )}
 
       {!isAdmin && isConnected && onPolygon && (

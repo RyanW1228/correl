@@ -126,12 +126,47 @@ type SelectedMarket = {
 
 type Props = {
   selectedMarket: SelectedMarket | null;
+  prefillClassId?: string | null;
 };
 
-export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
+export function EquivalenceClassAdminPanel({
+  selectedMarket,
+  prefillClassId,
+}: Props) {
   // Admin UI state
-  const [classIdInput, setClassIdInput] = useState<string>("");
+  type ClassMode = "new" | "existing";
+
+  const [classMode, setClassMode] = useState<ClassMode>("new");
+
+  // Always have a “new class” id ready (used when classMode === "new")
+  const [newClassId, setNewClassId] = useState<string>(randomBytes32());
+
+  // Used when classMode === "existing"
+  const [selectedExistingClassId, setSelectedExistingClassId] =
+    useState<string>("");
+
+  // UI: show/hide dropdown
+  const [showExistingDropdown, setShowExistingDropdown] = useState(false);
+
+  // Loaded from /api/correl/equiv-classes
+  const [existingClassIds, setExistingClassIds] = useState<string[]>([]);
+  const [existingLoadError, setExistingLoadError] = useState<string>("");
+
+  useEffect(() => {
+    const v = (prefillClassId ?? "").trim();
+    if (!v) return;
+    if (!isBytes32Hex(v)) return;
+
+    setClassMode("existing");
+    setSelectedExistingClassId(v);
+    setShowExistingDropdown(false);
+  }, [prefillClassId]);
+
   const [localError, setLocalError] = useState<string>("");
+
+  const effectiveClassId = useMemo(() => {
+    return classMode === "new" ? newClassId : selectedExistingClassId;
+  }, [classMode, newClassId, selectedExistingClassId]);
 
   // you told me not to guess your assetId scheme, so we input both explicitly
   const [assetIdPos, setAssetIdPos] = useState<string>(""); // bytes32
@@ -212,7 +247,7 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
   }, [writeError]);
 
   const canRegisterPair = useMemo(() => {
-    if (!isBytes32Hex(classIdInput.trim())) return false;
+    if (!isBytes32Hex(effectiveClassId.trim())) return false;
     if (!isBytes32Hex(assetIdPos.trim())) return false;
     if (!isBytes32Hex(assetIdNeg.trim())) return false;
 
@@ -230,7 +265,7 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
 
     return true;
   }, [
-    classIdInput,
+    effectiveClassId,
     assetIdPos,
     assetIdNeg,
     pickedYesTokenId,
@@ -341,10 +376,42 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
     setPendingSecondTx(null);
   }, [pendingSecondTx, isSuccess, txHash, writeContract]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+
+    (async () => {
+      try {
+        setExistingLoadError("");
+        const res = await fetch("/api/correl/equiv-classes", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const json = (await res.json()) as any;
+
+        const ids = Array.isArray(json?.classes)
+          ? json.classes
+              .map((c: any) =>
+                typeof c?.classId === "string" ? c.classId : "",
+              )
+              .filter((x: string) => isBytes32Hex(x))
+          : [];
+
+        // de-dupe, preserve order
+        setExistingClassIds(Array.from(new Set(ids)));
+      } catch (e: any) {
+        if (e?.name === "AbortError") return;
+        setExistingClassIds([]);
+        setExistingLoadError("Failed to load existing classes");
+      }
+    })();
+
+    return () => controller.abort();
+  }, []);
+
   async function onRegisterPair() {
     setLocalError("");
 
-    const classId = classIdInput.trim();
+    const classId = effectiveClassId.trim();
     const posId = assetIdPos.trim();
     const negId = assetIdNeg.trim();
 
@@ -529,27 +596,85 @@ export function EquivalenceClassAdminPanel({ selectedMarket }: Props) {
         )}
       </div>
 
-      {/* Create class (existing behavior preserved) */}
-      <div style={{ marginBottom: 8 }}>
-        <div>classId (bytes32):</div>
-        <input
-          value={classIdInput}
-          onChange={(e) => setClassIdInput(e.target.value)}
-          placeholder="0x + 64 hex chars"
-          style={{ width: 520, maxWidth: "100%" }}
-        />
-      </div>
+      {/* Class selection (no manual entry) */}
+      <div style={{ padding: 12, border: "2px solid black", marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, marginBottom: 8 }}>Class Selection</div>
 
-      <div style={{ marginBottom: 8 }}>
-        <button
-          type="button"
-          onClick={() => {
-            const id = randomBytes32();
-            setClassIdInput(id);
+        <div
+          style={{
+            display: "flex",
+            gap: 12,
+            flexWrap: "wrap",
+            marginBottom: 10,
           }}
         >
-          Generate random classId
-        </button>
+          <button
+            type="button"
+            onClick={() => {
+              setClassMode("new");
+              setShowExistingDropdown(false);
+              // refresh “new class” id so it’s always clearly a new class action
+              setNewClassId(randomBytes32());
+            }}
+            disabled={classMode === "new"}
+          >
+            Create New Class
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setClassMode("existing");
+              setShowExistingDropdown(true);
+            }}
+            disabled={classMode === "existing"}
+          >
+            Choose From Existing Classes
+          </button>
+        </div>
+
+        {classMode === "existing" && (
+          <div style={{ fontSize: 12 }}>
+            {existingLoadError && (
+              <div style={{ color: "red", marginBottom: 8 }}>
+                {existingLoadError}
+              </div>
+            )}
+
+            {showExistingDropdown && (
+              <>
+                <div style={{ marginBottom: 6 }}>Pick an existing classId:</div>
+                <select
+                  value={selectedExistingClassId}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSelectedExistingClassId(v);
+                    if (v) setShowExistingDropdown(false);
+                  }}
+                  style={{
+                    width: 520,
+                    maxWidth: "100%",
+                    fontFamily: "monospace",
+                  }}
+                >
+                  <option value="">(select)</option>
+                  {existingClassIds.map((id) => (
+                    <option key={id} value={id}>
+                      {id}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+          </div>
+        )}
+
+        <div style={{ marginTop: 8, fontSize: 12 }}>
+          ClassId:{" "}
+          <span style={{ fontFamily: "monospace" }}>
+            {effectiveClassId || "(not selected)"}
+          </span>
+        </div>
       </div>
 
       <div style={{ padding: 12, border: "2px solid black", marginBottom: 16 }}>
