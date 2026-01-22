@@ -121,6 +121,13 @@ export function MarketSearchPanel({ onSelectMarket }: Props) {
   const [selectedSlug, setSelectedSlug] = useState("");
   const [marketDetailJson, setMarketDetailJson] = useState("");
 
+  function clearResultsUI() {
+    setEvents([]);
+    setActiveEventIdx(0);
+    setSelectedSlug("");
+    setMarketDetailJson("");
+  }
+
   const activeEvent = useMemo(() => {
     if (events.length === 0) return null;
     const idx = Math.min(Math.max(activeEventIdx, 0), events.length - 1);
@@ -224,6 +231,7 @@ export function MarketSearchPanel({ onSelectMarket }: Props) {
         setMarketDetailJson(JSON.stringify(hydrated.raw, null, 2));
 
         onSelectMarket(picked);
+        clearResultsUI();
         return;
       } catch (e: any) {
         // If hydration fails, still allow selection (but warn)
@@ -239,6 +247,7 @@ export function MarketSearchPanel({ onSelectMarket }: Props) {
     }
 
     onSelectMarket(base);
+    clearResultsUI();
   }
 
   return (

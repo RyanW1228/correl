@@ -124,6 +124,23 @@ type SelectedMarket = {
   clobTokenIds?: string[]; // fallback list for dropdown
 };
 
+type ExistingAsset = {
+  assetId: string;
+  polarity: "POS" | "NEG" | "UNKNOWN";
+  side: "YES" | "NO";
+  tokenId: string;
+  conditionId: string;
+  title: string | null;
+  polymarketUrl: string | null;
+  midpoint: number | null;
+};
+
+type ExistingClassEntry = {
+  classId: string;
+  pos: ExistingAsset[];
+  neg: ExistingAsset[];
+};
+
 type Props = {
   selectedMarket: SelectedMarket | null;
   prefillClassId?: string | null;
@@ -149,7 +166,9 @@ export function EquivalenceClassAdminPanel({
   const [showExistingDropdown, setShowExistingDropdown] = useState(false);
 
   // Loaded from /api/correl/equiv-classes
-  const [existingClassIds, setExistingClassIds] = useState<string[]>([]);
+  const [existingClasses, setExistingClasses] = useState<ExistingClassEntry[]>(
+    [],
+  );
   const [existingLoadError, setExistingLoadError] = useState<string>("");
 
   useEffect(() => {
@@ -168,9 +187,52 @@ export function EquivalenceClassAdminPanel({
     return classMode === "new" ? newClassId : selectedExistingClassId;
   }, [classMode, newClassId, selectedExistingClassId]);
 
-  // you told me not to guess your assetId scheme, so we input both explicitly
-  const [assetIdPos, setAssetIdPos] = useState<string>(""); // bytes32
-  const [assetIdNeg, setAssetIdNeg] = useState<string>(""); // bytes32
+  const selectedClassEntry = useMemo(() => {
+    const id = effectiveClassId.trim().toLowerCase();
+    if (!id) return null;
+    return existingClasses.find((c) => c.classId.toLowerCase() === id) ?? null;
+  }, [effectiveClassId, existingClasses]);
+
+  function inferClassPolarityOrientation(entry: ExistingClassEntry): {
+    inferred: "normal" | "flipped" | "unknown";
+    posYes: number;
+    posNo: number;
+    negYes: number;
+    negNo: number;
+  } {
+    const pos = entry.pos ?? [];
+    const neg = entry.neg ?? [];
+
+    const posYes = pos.filter((a) => a.side === "YES").length;
+    const posNo = pos.filter((a) => a.side === "NO").length;
+    const negYes = neg.filter((a) => a.side === "YES").length;
+    const negNo = neg.filter((a) => a.side === "NO").length;
+
+    const total = pos.length + neg.length;
+    if (total < 2) {
+      return { inferred: "unknown", posYes, posNo, negYes, negNo };
+    }
+
+    // “Normal” means POS tends to be YES and NEG tends to be NO.
+    const normalScore = posYes + negNo;
+    const flippedScore = posNo + negYes;
+
+    if (normalScore === flippedScore) {
+      return { inferred: "unknown", posYes, posNo, negYes, negNo };
+    }
+
+    return {
+      inferred: normalScore > flippedScore ? "normal" : "flipped",
+      posYes,
+      posNo,
+      negYes,
+      negNo,
+    };
+  }
+
+  // assetIds are auto-generated in the UI (not user-entered).
+  const [assetIdPos, setAssetIdPos] = useState<string>(() => randomBytes32()); // bytes32
+  const [assetIdNeg, setAssetIdNeg] = useState<string>(() => randomBytes32()); // bytes32
 
   // pick which token is market YES/NO, then optional flip mapping into POS/NEG
   const [pickedYesTokenId, setPickedYesTokenId] = useState<string>("");
@@ -248,8 +310,8 @@ export function EquivalenceClassAdminPanel({
 
   const canRegisterPair = useMemo(() => {
     if (!isBytes32Hex(effectiveClassId.trim())) return false;
-    if (!isBytes32Hex(assetIdPos.trim())) return false;
-    if (!isBytes32Hex(assetIdNeg.trim())) return false;
+    if (!isBytes32Hex(assetIdPos)) return false;
+    if (!isBytes32Hex(assetIdNeg)) return false;
 
     // hidden constants (must be set)
     if (!isAddress(DEFAULT_CTF_ADDRESS)) return false;
@@ -304,10 +366,8 @@ export function EquivalenceClassAdminPanel({
     setNoMid(null);
     setMidError("");
 
-    // If assetIds aren't set yet, generate them on market select (one-time).
-    // (Does NOT overwrite if you already typed/pasted valid bytes32s.)
-    if (!isBytes32Hex(assetIdPos.trim())) setAssetIdPos(randomBytes32());
-    if (!isBytes32Hex(assetIdNeg.trim())) setAssetIdNeg(randomBytes32());
+    setAssetIdPos(randomBytes32());
+    setAssetIdNeg(randomBytes32());
   }, [selectedMarket]);
 
   useEffect(() => {
@@ -388,19 +448,31 @@ export function EquivalenceClassAdminPanel({
         });
         const json = (await res.json()) as any;
 
-        const ids = Array.isArray(json?.classes)
+        const classes: ExistingClassEntry[] = Array.isArray(json?.classes)
           ? json.classes
-              .map((c: any) =>
-                typeof c?.classId === "string" ? c.classId : "",
+              .map((c: any) => {
+                const classId = typeof c?.classId === "string" ? c.classId : "";
+                if (!isBytes32Hex(classId)) return null;
+
+                const pos = Array.isArray(c?.pos)
+                  ? (c.pos as ExistingAsset[])
+                  : [];
+                const neg = Array.isArray(c?.neg)
+                  ? (c.neg as ExistingAsset[])
+                  : [];
+
+                return { classId, pos, neg } as ExistingClassEntry;
+              })
+              .filter(
+                (x: ExistingClassEntry | null): x is ExistingClassEntry =>
+                  x !== null,
               )
-              .filter((x: string) => isBytes32Hex(x))
           : [];
 
-        // de-dupe, preserve order
-        setExistingClassIds(Array.from(new Set(ids)));
+        setExistingClasses(classes);
       } catch (e: any) {
         if (e?.name === "AbortError") return;
-        setExistingClassIds([]);
+        setExistingClasses([]);
         setExistingLoadError("Failed to load existing classes");
       }
     })();
@@ -410,6 +482,31 @@ export function EquivalenceClassAdminPanel({
 
   async function onRegisterPair() {
     setLocalError("");
+
+    // Polarity sanity-check: only meaningful when adding into an existing class.
+    if (classMode === "existing" && selectedClassEntry) {
+      const info = inferClassPolarityOrientation(selectedClassEntry);
+
+      // If the class is inferred “normal”, we expect POS~YES and NEG~NO.
+      // flipPolarity=true means you are about to do POS~NO and NEG~YES.
+      const intended: "normal" | "flipped" = flipPolarity
+        ? "flipped"
+        : "normal";
+
+      if (info.inferred !== "unknown" && info.inferred !== intended) {
+        const msg =
+          `Possible polarity mismatch detected for this class.\n\n` +
+          `Existing class looks: ${info.inferred.toUpperCase()}\n` +
+          `  POS: YES=${info.posYes}, NO=${info.posNo}\n` +
+          `  NEG: YES=${info.negYes}, NO=${info.negNo}\n\n` +
+          `You are about to register using: ${intended.toUpperCase()} ` +
+          `(because Flip polarity is ${flipPolarity ? "ON" : "OFF"}).\n\n` +
+          `Continue anyway?`;
+
+        const ok = window.confirm(msg);
+        if (!ok) return;
+      }
+    }
 
     const classId = effectiveClassId.trim();
     const posId = assetIdPos.trim();
@@ -564,10 +661,16 @@ export function EquivalenceClassAdminPanel({
                 {preview ? (
                   <>
                     <div>
-                      POS tokenId to register: {preview.posTokenId.toString()}
+                      POS tokenId to register: {preview.posTokenId.toString()}{" "}
+                      <span style={{ color: "#555" }}>
+                        (Market {flipPolarity ? "NO" : "YES"})
+                      </span>
                     </div>
                     <div>
-                      NEG tokenId to register: {preview.negTokenId.toString()}
+                      NEG tokenId to register: {preview.negTokenId.toString()}{" "}
+                      <span style={{ color: "#555" }}>
+                        (Market {flipPolarity ? "YES" : "NO"})
+                      </span>
                     </div>
                   </>
                 ) : (
@@ -657,10 +760,9 @@ export function EquivalenceClassAdminPanel({
                     fontFamily: "monospace",
                   }}
                 >
-                  <option value="">(select)</option>
-                  {existingClassIds.map((id) => (
-                    <option key={id} value={id}>
-                      {id}
+                  {existingClasses.map((c) => (
+                    <option key={c.classId} value={c.classId}>
+                      {c.classId}
                     </option>
                   ))}
                 </select>
@@ -675,45 +777,112 @@ export function EquivalenceClassAdminPanel({
             {effectiveClassId || "(not selected)"}
           </span>
         </div>
+
+        {classMode === "existing" && effectiveClassId && (
+          <div style={{ marginTop: 12 }}>
+            {!selectedClassEntry ? (
+              <div style={{ fontSize: 12 }}>
+                (No class data loaded for this classId.)
+              </div>
+            ) : (
+              <table
+                style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontSize: 12,
+                }}
+              >
+                <thead>
+                  <tr>
+                    <th align="left">Market</th>
+                    <th align="left">Side</th>
+                    <th align="left">Midpoint</th>
+                    <th align="left">conditionId</th>
+                    <th align="left">tokenId</th>
+                    <th align="left">Link</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {/* POS */}
+                  <tr>
+                    <td colSpan={6} style={{ paddingTop: 10, fontWeight: 600 }}>
+                      POS
+                    </td>
+                  </tr>
+                  {(selectedClassEntry.pos ?? []).map((m) => (
+                    <tr key={m.assetId}>
+                      <td>{m.title ?? "(no title)"}</td>
+                      <td>{m.side}</td>
+                      <td>
+                        {m.midpoint == null ? "—" : m.midpoint.toFixed(4)}
+                      </td>
+                      <td style={{ fontFamily: "monospace" }}>
+                        {m.conditionId.slice(0, 10)}…{m.conditionId.slice(-8)}
+                      </td>
+                      <td style={{ fontFamily: "monospace" }}>
+                        {m.tokenId.slice(0, 10)}…{m.tokenId.slice(-8)}
+                      </td>
+                      <td>
+                        {m.polymarketUrl ? (
+                          <a
+                            href={m.polymarketUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            ↗
+                          </a>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+
+                  {/* NEG */}
+                  <tr>
+                    <td colSpan={6} style={{ paddingTop: 10, fontWeight: 600 }}>
+                      NEG
+                    </td>
+                  </tr>
+                  {(selectedClassEntry.neg ?? []).map((m) => (
+                    <tr key={m.assetId}>
+                      <td>{m.title ?? "(no title)"}</td>
+                      <td>{m.side}</td>
+                      <td>
+                        {m.midpoint == null ? "—" : m.midpoint.toFixed(4)}
+                      </td>
+                      <td style={{ fontFamily: "monospace" }}>
+                        {m.conditionId.slice(0, 10)}…{m.conditionId.slice(-8)}
+                      </td>
+                      <td style={{ fontFamily: "monospace" }}>
+                        {m.tokenId.slice(0, 10)}…{m.tokenId.slice(-8)}
+                      </td>
+                      <td>
+                        {m.polymarketUrl ? (
+                          <a
+                            href={m.polymarketUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            ↗
+                          </a>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
       </div>
 
       <div style={{ padding: 12, border: "2px solid black", marginBottom: 16 }}>
         <div style={{ fontWeight: 700, marginBottom: 8 }}>
           Register Market Into Class (POS + NEG)
-        </div>
-
-        <div
-          style={{ marginBottom: 8, display: "flex", gap: 8, flexWrap: "wrap" }}
-        >
-          <button
-            type="button"
-            onClick={() => {
-              setAssetIdPos(randomBytes32());
-              setAssetIdNeg(randomBytes32());
-            }}
-          >
-            Generate random asset IDs
-          </button>
-        </div>
-
-        <div style={{ marginBottom: 8 }}>
-          <div>assetId for POS leg (bytes32):</div>
-          <input
-            value={assetIdPos}
-            onChange={(e) => setAssetIdPos(e.target.value)}
-            placeholder="0x + 64 hex chars"
-            style={{ width: 520, maxWidth: "100%" }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 8 }}>
-          <div>assetId for NEG leg (bytes32):</div>
-          <input
-            value={assetIdNeg}
-            onChange={(e) => setAssetIdNeg(e.target.value)}
-            placeholder="0x + 64 hex chars"
-            style={{ width: 520, maxWidth: "100%" }}
-          />
         </div>
 
         <div style={{ marginBottom: 8 }}>
@@ -751,19 +920,20 @@ export function EquivalenceClassAdminPanel({
           {preview ? (
             <>
               <div>
-                POS tokenId to register: {preview.posTokenId.toString()}
+                POS tokenId to register: {preview.posTokenId.toString()}{" "}
+                <span style={{ color: "#555" }}>
+                  (Market {flipPolarity ? "NO" : "YES"})
+                </span>
               </div>
               <div>
-                NEG tokenId to register: {preview.negTokenId.toString()}
-              </div>
-              <div>
-                Using indexSets (fixed): YES={DEFAULT_INDEXSET_YES.toString()}{" "}
-                NO=
-                {DEFAULT_INDEXSET_NO.toString()}
+                NEG tokenId to register: {preview.negTokenId.toString()}{" "}
+                <span style={{ color: "#555" }}>
+                  (Market {flipPolarity ? "YES" : "NO"})
+                </span>
               </div>
             </>
           ) : (
-            <div>(Enter YES/NO tokenIds to preview)</div>
+            <div>(Pick two tokenIds to preview mapping)</div>
           )}
         </div>
       </div>
