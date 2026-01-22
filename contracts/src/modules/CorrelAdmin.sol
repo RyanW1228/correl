@@ -48,19 +48,81 @@ abstract contract CorrelAdmin is CorrelViews {
     // ----------------------------
 
     /**
-     * Registers an ERC-1155 position token into Correl as an assetId.
+     * Registers a single binary YES/NO market in ONE transaction.
      *
-     * Intended usage:
-     * - token/tokenId: the ERC-1155 contract + token id representing the position
-     * - classId/polarity: equivalence class metadata used for swaps/redeems
-     * - settlement fields (conditionId/parentCollectionId/collateralToken/indexSet):
-     *   stored so settlement can validate resolution and call CTF redeemPositions.
+     * Semantics:
+     * - YES is always the position with indexSet = 1
+     * - NO  is always the position with indexSet = 2
+     * - The admin chooses the polarity of the YES side
+     * - The NO side is automatically assigned the opposite polarity
      *
-     * Requirements:
-     * - assetId is chosen by admin and must be unique and non-zero.
-     * - token and collateralToken must be non-zero addresses.
+     * Notes:
+     * - assetIds are admin-chosen (no on-chain derivation).
+     * - Polarity is a logical role (POS/NEG) and is NOT inherently tied to YES/NO.
      */
-    function registerAsset(
+    function registerBinaryMarketPair(
+        bytes32 yesAssetId,
+        bytes32 noAssetId,
+        IERC1155 token,
+        uint256 yesTokenId,
+        uint256 noTokenId,
+        bytes32 classId,
+        Polarity yesPolarity,
+        bytes32 conditionId,
+        bytes32 parentCollectionId,
+        IERC20 collateralToken
+    ) external {
+        _requireAdmin();
+
+        require(yesAssetId != bytes32(0), "yesAssetId=0");
+        require(noAssetId != bytes32(0), "noAssetId=0");
+        require(yesAssetId != noAssetId, "same assetId");
+
+        require(address(token) != address(0), "token=0");
+        require(address(collateralToken) != address(0), "collateral=0");
+
+        require(!assets[yesAssetId].exists, "yes exists");
+        require(!assets[noAssetId].exists, "no exists");
+
+        require(yesTokenId != noTokenId, "same tokenId");
+
+        require(
+            yesPolarity == Polarity.POS || yesPolarity == Polarity.NEG,
+            "bad yesPolarity"
+        );
+
+        Polarity noPolarity = (yesPolarity == Polarity.POS)
+            ? Polarity.NEG
+            : Polarity.POS;
+
+        // YES leg (indexSet = 1)
+        _registerAssetInternal(
+            yesAssetId,
+            token,
+            yesTokenId,
+            classId,
+            yesPolarity,
+            conditionId,
+            parentCollectionId,
+            collateralToken,
+            1
+        );
+
+        // NO leg (indexSet = 2)
+        _registerAssetInternal(
+            noAssetId,
+            token,
+            noTokenId,
+            classId,
+            noPolarity,
+            conditionId,
+            parentCollectionId,
+            collateralToken,
+            2
+        );
+    }
+
+    function _registerAssetInternal(
         bytes32 assetId,
         IERC1155 token,
         uint256 tokenId,
@@ -70,9 +132,7 @@ abstract contract CorrelAdmin is CorrelViews {
         bytes32 parentCollectionId,
         IERC20 collateralToken,
         uint256 indexSet
-    ) external {
-        _requireAdmin();
-
+    ) internal {
         require(assetId != bytes32(0), "assetId=0");
         require(address(token) != address(0), "token=0");
         require(address(collateralToken) != address(0), "collateral=0");
@@ -107,17 +167,48 @@ abstract contract CorrelAdmin is CorrelViews {
      *
      * Use this to correct mapping mistakes without re-registering the asset.
      */
-    function updateAssetClassAndPolarity(
-        bytes32 assetId,
+    function updateBinaryMarketPairClassAndPolarity(
+        bytes32 yesAssetId,
+        bytes32 noAssetId,
         bytes32 newClassId,
-        Polarity newPolarity
+        Polarity newYesPolarity
     ) external {
         _requireAdmin();
 
-        AssetInfo storage A = _requireAsset(assetId);
-        A.classId = newClassId;
-        A.polarity = newPolarity;
+        AssetInfo storage yesA = _requireAsset(yesAssetId);
+        AssetInfo storage noA = _requireAsset(noAssetId);
 
-        // No event (keeping minimal). Add one later if you want an on-chain audit trail.
+        require(yesAssetId != noAssetId, "same assetId");
+        require(
+            newYesPolarity == Polarity.POS || newYesPolarity == Polarity.NEG,
+            "bad yesPolarity"
+        );
+
+        // Safety: ensure these are actually the two legs of the same market.
+        require(yesA.conditionId == noA.conditionId, "condition mismatch");
+        require(
+            yesA.parentCollectionId == noA.parentCollectionId,
+            "collection mismatch"
+        );
+        require(
+            yesA.collateralToken == noA.collateralToken,
+            "collateral mismatch"
+        );
+        require(address(yesA.token) == address(noA.token), "token mismatch");
+
+        // For binary CTF positions, enforce YES indexSet=1 and NO indexSet=2.
+        require(yesA.indexSet == 1, "yes indexSet != 1");
+        require(noA.indexSet == 2, "no indexSet != 2");
+
+        Polarity newNoPolarity = (newYesPolarity == Polarity.POS)
+            ? Polarity.NEG
+            : Polarity.POS;
+
+        // Update classId + polarities atomically.
+        yesA.classId = newClassId;
+        yesA.polarity = newYesPolarity;
+
+        noA.classId = newClassId;
+        noA.polarity = newNoPolarity;
     }
 }
