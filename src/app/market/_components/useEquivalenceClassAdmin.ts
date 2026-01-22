@@ -176,6 +176,20 @@ function inferClassPolarityOrientation(entry: ExistingClassEntry): {
   };
 }
 
+function median(xs: number[]): number | null {
+  if (xs.length === 0) return null;
+  const a = [...xs].sort((p, q) => p - q);
+  const mid = Math.floor(a.length / 2);
+  if (a.length % 2 === 1) return a[mid];
+  return (a[mid - 1] + a[mid]) / 2;
+}
+
+function finiteMids(xs: ExistingAsset[]): number[] {
+  return (xs ?? [])
+    .map((m) => m.midpoint)
+    .filter((x): x is number => typeof x === "number" && Number.isFinite(x));
+}
+
 /* ---------------- Hook ---------------- */
 
 export function useEquivalenceClassAdmin(args: {
@@ -284,6 +298,55 @@ export function useEquivalenceClassAdmin(args: {
   const [yesMid, setYesMid] = useState<number | null>(null);
   const [noMid, setNoMid] = useState<number | null>(null);
   const [midError, setMidError] = useState<string>("");
+
+  const midpointMismatchWarning = useMemo(() => {
+    // Only relevant when registering into an existing class.
+    if (classMode !== "existing") return null;
+    if (!selectedClassEntry) return null;
+
+    // Need live midpoints from the selected market
+    if (yesMid == null || noMid == null) return null;
+
+    // Need reference midpoints from the class
+    const posMids = finiteMids(selectedClassEntry.pos ?? []);
+    const negMids = finiteMids(selectedClassEntry.neg ?? []);
+
+    const classPosRef = median(posMids);
+    const classNegRef = median(negMids);
+    if (classPosRef == null || classNegRef == null) return null;
+
+    // IMPORTANT: compare against the *mapped* POS/NEG midpoints (depends on flipPolarity)
+    const selectedPosMid = flipPolarity ? noMid : yesMid;
+    const selectedNegMid = flipPolarity ? yesMid : noMid;
+
+    // Tolerance: tune this. (0.02 = 2 cents)
+    const EPS = 0.02;
+
+    const dPos = Math.abs(selectedPosMid - classPosRef);
+    const dNeg = Math.abs(selectedNegMid - classNegRef);
+
+    if (dPos <= EPS && dNeg <= EPS) return null;
+
+    const fmt = (x: number) => x.toFixed(4);
+
+    const parts: string[] = [];
+    if (dPos > EPS) {
+      parts.push(
+        `POS midpoint mismatch: selected ${fmt(selectedPosMid)} vs class median ${fmt(
+          classPosRef,
+        )} (Δ=${fmt(dPos)})`,
+      );
+    }
+    if (dNeg > EPS) {
+      parts.push(
+        `NEG midpoint mismatch: selected ${fmt(selectedNegMid)} vs class median ${fmt(
+          classNegRef,
+        )} (Δ=${fmt(dNeg)})`,
+      );
+    }
+
+    return parts.join(" | ");
+  }, [classMode, selectedClassEntry, yesMid, noMid, flipPolarity]);
 
   // ---- staged NEG submit ----
   const [queuedNegArgs, setQueuedNegArgs] = useState<RegisterAssetArgs | null>(
@@ -497,25 +560,14 @@ export function useEquivalenceClassAdmin(args: {
   async function onRegisterPair() {
     setLocalError("");
 
-    if (classMode === "existing" && selectedClassEntry) {
-      const info = inferClassPolarityOrientation(selectedClassEntry);
-      const intended: "normal" | "flipped" = flipPolarity
-        ? "flipped"
-        : "normal";
+    if (midpointMismatchWarning) {
+      const msg =
+        `Midpoint mismatch detected.\n\n` +
+        `${midpointMismatchWarning}\n\n` +
+        `Continue anyway?`;
 
-      if (info.inferred !== "unknown" && info.inferred !== intended) {
-        const msg =
-          `Possible polarity mismatch detected for this class.\n\n` +
-          `Existing class looks: ${info.inferred.toUpperCase()}\n` +
-          `  POS: YES=${info.posYes}, NO=${info.posNo}\n` +
-          `  NEG: YES=${info.negYes}, NO=${info.negNo}\n\n` +
-          `You are about to register using: ${intended.toUpperCase()} ` +
-          `(because Flip polarity is ${flipPolarity ? "ON" : "OFF"}).\n\n` +
-          `Continue anyway?`;
-
-        const ok = window.confirm(msg);
-        if (!ok) return;
-      }
+      const ok = window.confirm(msg);
+      if (!ok) return;
     }
 
     const classId = effectiveClassId.trim();
@@ -623,6 +675,7 @@ export function useEquivalenceClassAdmin(args: {
     yesMid,
     noMid,
     midError,
+    midpointMismatchWarning,
 
     // register workflow + errors
     registerPhase,

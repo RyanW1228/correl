@@ -95,6 +95,7 @@ export function ClassSelectionSection(props: {
                   fontFamily: "monospace",
                 }}
               >
+                <option value="">(select)</option>
                 {existingClasses.map((c) => (
                   <option key={c.classId} value={c.classId}>
                     {c.classId}

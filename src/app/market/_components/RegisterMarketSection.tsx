@@ -27,6 +27,7 @@ export function RegisterMarketSection(props: {
   pendingSecondTx: unknown | null;
 
   duplicateMarketReason: string | null;
+  midpointMismatchWarning: string | null;
   localError: string;
 
   writeError: { message: string } | null;
@@ -49,6 +50,7 @@ export function RegisterMarketSection(props: {
     isConfirming,
     pendingSecondTx,
     duplicateMarketReason,
+    midpointMismatchWarning,
     localError,
     writeError,
     receiptError,
@@ -133,6 +135,12 @@ export function RegisterMarketSection(props: {
       {duplicateMarketReason && (
         <div style={{ color: "red", marginTop: 8 }}>
           {duplicateMarketReason}
+        </div>
+      )}
+
+      {midpointMismatchWarning && (
+        <div style={{ color: "red", marginTop: 8 }}>
+          {midpointMismatchWarning}
         </div>
       )}
 

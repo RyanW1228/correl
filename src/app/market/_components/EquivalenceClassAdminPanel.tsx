@@ -187,6 +187,7 @@ export function EquivalenceClassAdminPanel({
         isConfirming={s.isConfirming}
         pendingSecondTx={s.pendingSecondTx}
         duplicateMarketReason={s.duplicateMarketReason}
+        midpointMismatchWarning={s.midpointMismatchWarning}
         localError={s.localError}
         writeError={s.writeError}
         receiptError={s.receiptError}
