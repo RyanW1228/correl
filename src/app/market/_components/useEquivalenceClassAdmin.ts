@@ -190,6 +190,12 @@ function finiteMids(xs: ExistingAsset[]): number[] {
     .filter((x): x is number => typeof x === "number" && Number.isFinite(x));
 }
 
+function toPctPoints(x: number): number {
+  // If it looks like 0..1, convert to 0..100
+  if (x >= 0 && x <= 1) return x * 100;
+  return x;
+}
+
 /* ---------------- Hook ---------------- */
 
 export function useEquivalenceClassAdmin(args: {
@@ -315,15 +321,17 @@ export function useEquivalenceClassAdmin(args: {
     const classNegRef = median(negMids);
     if (classPosRef == null || classNegRef == null) return null;
 
-    // IMPORTANT: compare against the *mapped* POS/NEG midpoints (depends on flipPolarity)
-    const selectedPosMid = flipPolarity ? noMid : yesMid;
-    const selectedNegMid = flipPolarity ? yesMid : noMid;
+    const selectedPosMid = toPctPoints(flipPolarity ? noMid : yesMid);
+    const selectedNegMid = toPctPoints(flipPolarity ? yesMid : noMid);
 
-    // Tolerance: tune this. (0.02 = 2 cents)
-    const EPS = 0.02;
+    const classPosRefPct = toPctPoints(classPosRef);
+    const classNegRefPct = toPctPoints(classNegRef);
 
-    const dPos = Math.abs(selectedPosMid - classPosRef);
-    const dNeg = Math.abs(selectedNegMid - classNegRef);
+    // Tolerance in percentage points (e.g. 2.0 = 2%)
+    const EPS = 2.0;
+
+    const dPos = Math.abs(selectedPosMid - classPosRefPct);
+    const dNeg = Math.abs(selectedNegMid - classNegRefPct);
 
     if (dPos <= EPS && dNeg <= EPS) return null;
 
@@ -333,14 +341,14 @@ export function useEquivalenceClassAdmin(args: {
     if (dPos > EPS) {
       parts.push(
         `POS midpoint mismatch: selected ${fmt(selectedPosMid)} vs class median ${fmt(
-          classPosRef,
+          classPosRefPct,
         )} (Δ=${fmt(dPos)})`,
       );
     }
     if (dNeg > EPS) {
       parts.push(
         `NEG midpoint mismatch: selected ${fmt(selectedNegMid)} vs class median ${fmt(
-          classNegRef,
+          classNegRefPct,
         )} (Δ=${fmt(dNeg)})`,
       );
     }
