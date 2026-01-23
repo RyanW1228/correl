@@ -59,9 +59,17 @@ abstract contract CorrelLocks is CorrelAdmin {
         AssetInfo memory fromA = _requireAsset(fromAssetId);
         AssetInfo memory toA = _requireAsset(toAssetId);
 
+        require(fromA.status == AssetStatus.ACTIVE, "from asset disabled");
+        require(toA.status == AssetStatus.ACTIVE, "to asset disabled");
+
         require(
             tokenPoolStatus[toAssetId] == TokenPoolStatus.ACTIVE,
             "to pool settled"
+        );
+
+        require(
+            tokenPoolStatus[fromAssetId] == TokenPoolStatus.ACTIVE,
+            "from pool settled"
         );
 
         // Swap only allowed within the same equivalence class and polarity.
@@ -129,11 +137,13 @@ abstract contract CorrelLocks is CorrelAdmin {
         AssetInfo memory posA = _requireAsset(posAssetId);
         AssetInfo memory negA = _requireAsset(negAssetId);
 
-        // Redeem requires matching classId and opposite polarities (POS + NEG).
+        require(posA.status == AssetStatus.ACTIVE, "pos asset disabled");
+        require(negA.status == AssetStatus.ACTIVE, "neg asset disabled");
+
+        // Redeem requires matching classId and opposite polarities (one POS and one NEG).
         require(posAssetId != negAssetId, "same asset");
         require(posA.classId == negA.classId, "class mismatch");
-        require(posA.polarity == Polarity.POS, "pos not POS");
-        require(negA.polarity == Polarity.NEG, "neg not NEG");
+        require(posA.polarity != negA.polarity, "polarity not opposite");
 
         // Fee/net are derived deterministically from notional (qtyPairs).
         uint256 expectedFee = _feeFromNotional(qtyPairs);

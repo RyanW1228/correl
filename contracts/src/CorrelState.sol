@@ -44,12 +44,18 @@ abstract contract CorrelState is ERC1155Holder {
         NEG // NO-like
     }
 
+    enum AssetStatus {
+        ACTIVE,
+        DISABLED
+    }
+
     struct AssetInfo {
         IERC1155 token; // ERC1155 token contract (e.g. ConditionalTokens)
         uint256 tokenId; // position tokenId within the ERC1155 contract
         bytes32 classId; // equivalence class identifier
         Polarity polarity; // POS/NEG
         bool exists;
+        AssetStatus status; // ACTIVE / DISABLED
         // Settlement metadata (CTF)
         bytes32 conditionId; // CTF conditionId (used to verify resolution and redeem)
         bytes32 parentCollectionId; // parent collection for CTF redemption

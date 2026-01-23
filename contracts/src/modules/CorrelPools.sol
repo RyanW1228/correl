@@ -132,6 +132,8 @@ abstract contract CorrelPools is CorrelLocks {
         );
 
         AssetInfo memory a = _requireAsset(assetId);
+
+        require(a.status == AssetStatus.ACTIVE, "asset disabled");
         TokenPool storage p = tokenPool[assetId];
 
         // Auto-claim ALL entitlements BEFORE share balance changes.

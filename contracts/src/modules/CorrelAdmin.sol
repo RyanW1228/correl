@@ -145,6 +145,7 @@ abstract contract CorrelAdmin is CorrelViews {
         A.classId = classId;
         A.polarity = polarity;
         A.exists = true;
+        A.status = AssetStatus.ACTIVE;
 
         // Settlement metadata (CTF-compatible fields).
         A.conditionId = conditionId;
@@ -210,5 +211,37 @@ abstract contract CorrelAdmin is CorrelViews {
 
         noA.classId = newClassId;
         noA.polarity = newNoPolarity;
+    }
+
+    function setBinaryMarketPairStatus(
+        bytes32 yesAssetId,
+        bytes32 noAssetId,
+        AssetStatus newStatus
+    ) external {
+        _requireAdmin();
+
+        AssetInfo storage yesA = _requireAsset(yesAssetId);
+        AssetInfo storage noA = _requireAsset(noAssetId);
+
+        require(yesAssetId != noAssetId, "same assetId");
+
+        // Safety: ensure these are actually the two legs of the same market.
+        require(yesA.conditionId == noA.conditionId, "condition mismatch");
+        require(
+            yesA.parentCollectionId == noA.parentCollectionId,
+            "collection mismatch"
+        );
+        require(
+            yesA.collateralToken == noA.collateralToken,
+            "collateral mismatch"
+        );
+        require(address(yesA.token) == address(noA.token), "token mismatch");
+
+        // For binary CTF positions, enforce YES indexSet=1 and NO indexSet=2.
+        require(yesA.indexSet == 1, "yes indexSet != 1");
+        require(noA.indexSet == 2, "no indexSet != 2");
+
+        yesA.status = newStatus;
+        noA.status = newStatus;
     }
 }

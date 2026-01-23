@@ -45,6 +45,9 @@ abstract contract CorrelExecution is CorrelPools {
         AssetInfo memory fromA = _requireAsset(L.fromAssetId);
         AssetInfo memory toA = _requireAsset(L.toAssetId);
 
+        require(fromA.status == AssetStatus.ACTIVE, "from asset disabled");
+        require(toA.status == AssetStatus.ACTIVE, "to asset disabled");
+
         // Consume reservation (toAsset liquidity).
         TokenPool storage tp = tokenPool[L.toAssetId];
         require(tp.base.locked >= L.qty, "bad locked");
@@ -116,6 +119,13 @@ abstract contract CorrelExecution is CorrelPools {
 
         AssetInfo memory posA = _requireAsset(L.posAssetId);
         AssetInfo memory negA = _requireAsset(L.negAssetId);
+
+        require(posA.status == AssetStatus.ACTIVE, "pos asset disabled");
+        require(negA.status == AssetStatus.ACTIVE, "neg asset disabled");
+
+        require(L.posAssetId != L.negAssetId, "same asset");
+        require(posA.classId == negA.classId, "class mismatch");
+        require(posA.polarity != negA.polarity, "polarity not opposite");
 
         // Consume reservation (net payout).
         require(usdcPool.locked >= L.netUsdc, "bad locked");
