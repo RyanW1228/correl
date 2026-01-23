@@ -24,6 +24,7 @@ abstract contract CorrelViews is CorrelRewards {
             uint256 usdcShares,
             uint256 usdcWithdrawable,
             bytes32[] memory assetIds,
+            AssetStatus[] memory assetStatuses,
             uint256[] memory tokenShares,
             uint256[] memory tokenWithdrawableQty
         )
@@ -54,6 +55,7 @@ abstract contract CorrelViews is CorrelRewards {
 
         // Allocate outputs to activeCount
         assetIds = new bytes32[](activeCount);
+        assetStatuses = new AssetStatus[](activeCount);
         tokenShares = new uint256[](activeCount);
         tokenWithdrawableQty = new uint256[](activeCount);
 
@@ -67,6 +69,7 @@ abstract contract CorrelViews is CorrelRewards {
 
             uint256 s = p.base.shares[lp];
             assetIds[k] = assetId;
+            assetStatuses[k] = assets[assetId].status;
             tokenShares[k] = s;
 
             if (s == 0) {
