@@ -94,7 +94,7 @@ abstract contract CorrelPools is CorrelLocks {
         require(amountOut > 0, "out=0");
 
         // Enforce lock: only withdraw from the unlocked portion of the pool.
-        uint256 available = B - usdcPool.locked;
+        uint256 available = (B > usdcPool.locked) ? (B - usdcPool.locked) : 0;
         require(amountOut <= available, "locked");
 
         // Burn shares (effects before transfer).

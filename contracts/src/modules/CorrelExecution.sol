@@ -48,6 +48,15 @@ abstract contract CorrelExecution is CorrelPools {
         require(fromA.status == AssetStatus.ACTIVE, "from asset disabled");
         require(toA.status == AssetStatus.ACTIVE, "to asset disabled");
 
+        require(
+            tokenPoolStatus[L.toAssetId] == TokenPoolStatus.ACTIVE,
+            "to pool settled"
+        );
+        require(
+            tokenPoolStatus[L.fromAssetId] == TokenPoolStatus.ACTIVE,
+            "from pool settled"
+        );
+
         // Consume reservation (toAsset liquidity).
         TokenPool storage tp = tokenPool[L.toAssetId];
         require(tp.base.locked >= L.qty, "bad locked");
@@ -120,8 +129,20 @@ abstract contract CorrelExecution is CorrelPools {
         AssetInfo memory posA = _requireAsset(L.posAssetId);
         AssetInfo memory negA = _requireAsset(L.negAssetId);
 
+        require(L.feeUsdc <= L.qtyPairs, "fee>pairs");
+        require(L.netUsdc == L.qtyPairs - L.feeUsdc, "bad net");
+
         require(posA.status == AssetStatus.ACTIVE, "pos asset disabled");
         require(negA.status == AssetStatus.ACTIVE, "neg asset disabled");
+
+        require(
+            tokenPoolStatus[L.posAssetId] == TokenPoolStatus.ACTIVE,
+            "pos pool settled"
+        );
+        require(
+            tokenPoolStatus[L.negAssetId] == TokenPoolStatus.ACTIVE,
+            "neg pool settled"
+        );
 
         require(L.posAssetId != L.negAssetId, "same asset");
         require(posA.classId == negA.classId, "class mismatch");

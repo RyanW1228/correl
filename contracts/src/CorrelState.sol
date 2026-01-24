@@ -66,6 +66,22 @@ abstract contract CorrelState is ERC1155Holder {
     mapping(bytes32 => AssetInfo) public assets; // assetId => AssetInfo
 
     // ----------------------------
+    // Fees (market-level)
+    // ----------------------------
+    // NOTE:
+    // - "Market" is keyed by conditionId (CTF conditionId).
+    // - Single feeBps applies to BOTH swap and redeem-type operations.
+    // - No caps enforced here.
+    // - BPS units: 1 = 0.01%, 100 = 1.00%
+    struct MarketFeeParams {
+        uint16 feeBps;
+        bool exists;
+    }
+
+    // conditionId => params
+    mapping(bytes32 => MarketFeeParams) public marketFeeParams;
+
+    // ----------------------------
     // Pools
     // ----------------------------
     struct PoolBase {
@@ -173,6 +189,8 @@ abstract contract CorrelState is ERC1155Holder {
         Polarity polarity
     );
 
+    event MarketFeeParamsUpdated(bytes32 indexed conditionId, uint16 feeBps);
+
     // LP actions
     event DepositedUsdc(
         address indexed lp,
@@ -253,11 +271,29 @@ abstract contract CorrelState is ERC1155Holder {
     uint256 public constant FEE_BPS = 50;
     uint256 public constant BPS_DENOM = 10_000;
 
+    function _marketFeeBps(
+        bytes32 conditionId
+    ) internal view returns (uint256) {
+        MarketFeeParams memory p = marketFeeParams[conditionId];
+        // Default to legacy global fee if not configured
+        return p.exists ? uint256(p.feeBps) : uint256(FEE_BPS);
+    }
+
+    function _maxMarketFeeBps(
+        bytes32 conditionIdA,
+        bytes32 conditionIdB
+    ) internal view returns (uint256) {
+        uint256 a = _marketFeeBps(conditionIdA);
+        uint256 b = _marketFeeBps(conditionIdB);
+        return (a >= b) ? a : b;
+    }
+
     // Uses ceil division to avoid undercharging due to truncation.
-    function _feeFromNotional(
-        uint256 notionalUsdc
+    function _feeFromNotionalBps(
+        uint256 notionalUsdc,
+        uint256 feeBps
     ) internal pure returns (uint256) {
-        return (notionalUsdc * FEE_BPS + (BPS_DENOM - 1)) / BPS_DENOM;
+        return (notionalUsdc * feeBps + (BPS_DENOM - 1)) / BPS_DENOM;
     }
 
     uint256 public constant MAX_LOCK_DURATION = 120; // seconds

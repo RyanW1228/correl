@@ -11,6 +11,25 @@ abstract contract CorrelViews is CorrelRewards {
     // ----------------------------
 
     /**
+     * Market fee (bps) for a given conditionId.
+     * If the market fee hasn't been set, returns 0.
+     */
+    function marketFeeBps(bytes32 conditionId) external view returns (uint16) {
+        MarketFeeParams memory p = marketFeeParams[conditionId];
+        return p.exists ? p.feeBps : 0;
+    }
+
+    /**
+     * Market fee (bps) for the market that an asset belongs to (via its conditionId).
+     * If the market fee hasn't been set, returns 0.
+     */
+    function assetMarketFeeBps(bytes32 assetId) external view returns (uint16) {
+        AssetInfo memory a = _requireAsset(assetId);
+        MarketFeeParams memory p = marketFeeParams[a.conditionId];
+        return p.exists ? p.feeBps : 0;
+    }
+
+    /**
      * Returns a summary of an LP's positions:
      * - USDC pool shares and currently withdrawable USDC
      * - Token pool shares and currently withdrawable token qty (ACTIVE pools only)

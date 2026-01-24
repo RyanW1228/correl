@@ -16,7 +16,7 @@ import {CorrelAdmin} from "./CorrelAdmin.sol";
  * - structs/enums: Lock, LockKind, TokenPool, TokenPoolStatus, AssetInfo, Polarity
  * - storage: locks, tokenPool, tokenPoolStatus, usdcPool
  * - constants: MAX_LOCK_DURATION
- * - helpers: _feeFromNotional, _requireAsset, tokenPoolBalance, usdcPoolBalance
+ * - helpers: _feeFromNotionalBps, _maxMarketFeeBps, _requireAsset, tokenPoolBalance, usdcPoolBalance
  * - events: QuoteLocked, LockExpired
  */
 abstract contract CorrelLocks is CorrelAdmin {
@@ -43,10 +43,6 @@ abstract contract CorrelLocks is CorrelAdmin {
         require(locks[lockId].taker == address(0), "lock exists");
         require(qty > 0, "qty=0");
 
-        // Fee is derived deterministically from notional (qty).
-        uint256 expectedFee = _feeFromNotional(qty);
-        require(feeUsdc == expectedFee, "bad fee");
-
         // Deadline bounds (prevents long-lived reserve griefing).
         require(deadline >= block.timestamp, "deadline<now");
         require(
@@ -58,6 +54,12 @@ abstract contract CorrelLocks is CorrelAdmin {
 
         AssetInfo memory fromA = _requireAsset(fromAssetId);
         AssetInfo memory toA = _requireAsset(toAssetId);
+
+        // Fee is derived deterministically from notional (qty) using market-level fees.
+        // We take the higher fee between the two markets involved (from + to).
+        uint256 feeBps = _maxMarketFeeBps(fromA.conditionId, toA.conditionId);
+        uint256 expectedFee = _feeFromNotionalBps(qty, feeBps);
+        require(feeUsdc == expectedFee, "bad fee");
 
         require(fromA.status == AssetStatus.ACTIVE, "from asset disabled");
         require(toA.status == AssetStatus.ACTIVE, "to asset disabled");
@@ -145,8 +147,10 @@ abstract contract CorrelLocks is CorrelAdmin {
         require(posA.classId == negA.classId, "class mismatch");
         require(posA.polarity != negA.polarity, "polarity not opposite");
 
-        // Fee/net are derived deterministically from notional (qtyPairs).
-        uint256 expectedFee = _feeFromNotional(qtyPairs);
+        // Fee/net are derived deterministically from notional (qtyPairs) using market-level fees.
+        // Redeem can involve two different markets, so we charge the higher of the two market fees.
+        uint256 feeBps = _maxMarketFeeBps(posA.conditionId, negA.conditionId);
+        uint256 expectedFee = _feeFromNotionalBps(qtyPairs, feeBps);
         require(feeUsdc == expectedFee, "bad fee");
         require(netUsdc == qtyPairs - expectedFee, "bad net");
 

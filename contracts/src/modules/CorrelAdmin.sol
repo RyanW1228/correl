@@ -44,6 +44,34 @@ abstract contract CorrelAdmin is CorrelViews {
     }
 
     // ----------------------------
+    // Fee params (admin-controlled)
+    // ----------------------------
+
+    function _setMarketFeeBps(bytes32 conditionId, uint16 feeBps) internal {
+        require(conditionId != bytes32(0), "conditionId=0");
+
+        marketFeeParams[conditionId] = MarketFeeParams({
+            feeBps: feeBps,
+            exists: true
+        });
+
+        emit MarketFeeParamsUpdated(conditionId, feeBps);
+    }
+
+    /**
+     * Sets/updates the fee (bps) for a market (keyed by conditionId).
+     * This fee applies to BOTH swap + redeem.
+     *
+     * Notes:
+     * - No caps enforced here (per your requirement).
+     * - feeBps can be 0.
+     */
+    function setMarketFeeBps(bytes32 conditionId, uint16 feeBps) external {
+        _requireAdmin();
+        _setMarketFeeBps(conditionId, feeBps);
+    }
+
+    // ----------------------------
     // Asset registry ops
     // ----------------------------
 
@@ -70,7 +98,8 @@ abstract contract CorrelAdmin is CorrelViews {
         Polarity yesPolarity,
         bytes32 conditionId,
         bytes32 parentCollectionId,
-        IERC20 collateralToken
+        IERC20 collateralToken,
+        uint16 feeBps
     ) external {
         _requireAdmin();
 
@@ -80,11 +109,16 @@ abstract contract CorrelAdmin is CorrelViews {
 
         require(address(token) != address(0), "token=0");
         require(address(collateralToken) != address(0), "collateral=0");
+        require(conditionId != bytes32(0), "conditionId=0");
 
         require(!assets[yesAssetId].exists, "yes exists");
         require(!assets[noAssetId].exists, "no exists");
 
         require(yesTokenId != noTokenId, "same tokenId");
+
+        require(!marketFeeParams[conditionId].exists, "market fee exists");
+
+        _setMarketFeeBps(conditionId, feeBps);
 
         require(
             yesPolarity == Polarity.POS || yesPolarity == Polarity.NEG,
